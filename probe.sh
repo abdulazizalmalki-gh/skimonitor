@@ -258,9 +258,10 @@ if [ -z "$GPUS" ]; then
     [ -z "$drv" ] && drv="no driver"
     slot=$(basename "$d"); nm=""
     if command -v lspci >/dev/null 2>&1; then
-      nm=$(lspci -s "${slot#0000:}" 2>/dev/null | sed 's/^[^ ]*: *//;s/ (rev [^)]*)//')
-      nm=${nm#*controller: }      # keep "NVIDIA ... [[GPU model]]" not "3D controller: ..."
-      nm=${nm#VGA compatible controller: }
+      raw=$(lspci -s "${slot#0000:}" 2>/dev/null | sed 's/^[^ ]*: *//;s/ (rev [^)]*)//')
+      # lspci format: "Vendor [VEN] Product [PRODUCT]" — the last bracket is the product
+      nm=$(printf '%s' "$raw" | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
+      [ -z "$nm" ] && nm="$raw"
     fi
     case $vend in
       0x10de) vname="NVIDIA" ;; 0x1002) vname="AMD" ;; 0x8086) vname="Intel" ;;

@@ -522,7 +522,7 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
                     } else {
                         lines.push(Line::from(fit(
                             vec![Span::styled(
-                                format!("{short_name} (no driver: PCI presence only)"),
+                                format!("{short_name} · PCI presence only, no metrics"),
                                 Style::default().fg(C_MUTED),
                             )],
                             inner_w,
