@@ -1,0 +1,15 @@
+[package]
+name = "sshscope"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-host SSH monitoring TUI: CPU/mem/disk/net/GPU/per-core load/temps"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+strip = true
