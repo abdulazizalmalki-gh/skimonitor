@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sshscope remote probe — runs ON THE TARGET via `ssh ... bash -s`.
+# skimonitor remote probe — runs ON THE TARGET via `ssh ... bash -s`.
 # Requires only bash + coreutils (no jq/python). Prints exactly ONE JSON object.
 # All counters are raw; the caller diffs consecutive samples for rates.
 set -u

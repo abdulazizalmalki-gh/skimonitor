@@ -36,7 +36,7 @@ pub fn draw(
     // ---- header ----
     let mut head: Vec<Span> = vec![
         Span::styled(
-            " sshscope ",
+            " skimonitor ",
             Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -742,7 +742,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let rect = Rect::new(x, y, w, h);
     let text = vec![
         Line::from(Span::styled(
-            "sshscope — up to 3 hosts, all live on one screen",
+            "skimonitor — up to 3 hosts, all live on one screen",
             Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),

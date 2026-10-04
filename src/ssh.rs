@@ -149,7 +149,7 @@ pub fn stream_script(sleep_secs: u64) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "sshscope_frame() {{\n{body}\n}}\nwhile :; do\n  sshscope_frame\n  sleep {sleep_secs}\ndone\n"
+        "skimonitor_frame() {{\n{body}\n}}\nwhile :; do\n  skimonitor_frame\n  sleep {sleep_secs}\ndone\n"
     )
 }
 

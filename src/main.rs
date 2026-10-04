@@ -42,8 +42,8 @@ fn parse_args() -> Args {
             "--once" | "-o" => once = true,
             "-h" | "--help" => {
                 println!(
-                    "sshscope — multi-host SSH monitor TUI (streaming)\n\n\
-                     usage: sshscope [options] [host ...]\n\
+                    "skimonitor — multi-host SSH monitor TUI (streaming)\n\n\
+                     usage: skimonitor [options] [host ...]\n\
                      \x20 host        user@hostname, ~/.ssh/config alias, or IP; 'local' self-scans\n\
                      \x20 -i SECONDS  stream frame interval (default 1)\n\
                      \x20 --once      probe each host once, print summary, exit (no TUI)\n\n\

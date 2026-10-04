@@ -6,4 +6,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export RUSTFLAGS="--remap-path-prefix=$HOME=/home/user"
 cargo build --release "$@"
-echo "built target/release/sshscope (paths remapped)"
+echo "built target/release/skimonitor (paths remapped)"
