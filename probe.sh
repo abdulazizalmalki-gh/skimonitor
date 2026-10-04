@@ -54,7 +54,8 @@ done < /proc/stat
 declare -A CPUCORE
 for f in /sys/devices/system/cpu/cpu*/topology/core_id; do
   [ -r "$f" ] || continue
-  c=$(basename "$(dirname "$f")"); c=${c#cpu}
+  c=$(basename "$(dirname "$(dirname "$f")")"); c=${c#cpu}
+  [[ $c == [0-9]* ]] || continue
   CPUCORE[$c]=$(cat "$f" 2>/dev/null)
 done
 
@@ -109,7 +110,7 @@ while read -r src fstype size used avail ipct mp _; do
   r=${RSEC[$base]:-}; w=${WSEC[$base]:-}
   if [ -z "$r" ]; then
     mm=$(stat -c '%H:%L' "$src" 2>/dev/null)   # major:minor — works for LVM/multipath
-    r=${MAJMIN_R[$mm]:-0}; w=${MAJMIN_W[$mm]:-0}
+    if [ -n "$mm" ]; then r=${MAJMIN_R[$mm]:-0}; w=${MAJMIN_W[$mm]:-0}; fi
   fi
   if [ -z "$r" ] && [ -n "$base" ]; then
     stem=$(printf '%s' "$base" | sed -e 's/[0-9]*$//' -e 's/p$//')
@@ -120,6 +121,31 @@ while read -r src fstype size used avail ipct mp _; do
   [ -n "$DISKS" ] && DISKS+=','
   DISKS+="{\"mount\":\"$mpj\",\"device\":\"$sj\",\"fs\":\"$fj\",\"size\":$(num "$size" 0),\"used\":$(num "$used" 0),\"avail\":$(num "$avail" 0),\"use_pct\":$pct,\"rsec\":$r,\"wsec\":$w}"
 done < <(df -PT -B1 2>/dev/null | awk 'NR>1 && $1!="Filesystem"')
+
+# ---------- ZFS pools (df blind spot: zvols + pool-level usage) ----------
+ZPOOLS=''
+if command -v zpool >/dev/null 2>&1; then
+  while read -r nm sz al fr cap st rest; do
+    [ -z "$nm" ] && continue
+    [ -n "$ZPOOLS" ] && ZPOOLS+=','
+    ZPOOLS+="{\"name\":\"$(jstr "$nm")\",\"size\":$(num "${sz//[^0-9]/}" 0),\"alloc\":$(num "${al//[^0-9]/}" 0),\"free\":$(num "${fr//[^0-9]/}" 0),\"cap\":$(num "${cap%\%}" 0),\"state\":\"$(jstr "${st:-UNKNOWN}")\"}"
+  done < <(zpool list -p -o name,size,alloc,free,cap,health 2>/dev/null | tail -n +2)
+fi
+
+# ---------- ZFS datasets (quota-based truth for subvol/vm zvols) ----------
+ZDATS=''
+if command -v zfs >/dev/null 2>&1; then
+  while IFS=$'\t' read -r nm ty us qt rq av vs; do
+    [ -z "$nm" ] && continue
+    case $qt in none|'-') qv=-1 ;; 0) qv=-1 ;; *) qv=$(num "${qt//[^0-9]/}" -1) ;; esac
+    case $rq in none|'-') rv=-1 ;; 0) rv=-1 ;; *) rv=$(num "${rq//[^0-9]/}" -1) ;; esac
+    case $vs in none|'-') vv=-1 ;; 0) vv=-1 ;; *) vv=$(num "${vs//[^0-9]/}" -1) ;; esac
+    [ -n "$ZDATS" ] && ZDATS+=','
+    ZDATS+="{\"name\":\"$(jstr "$nm")\",\"type\":\"$(jstr "$ty")\",\"used\":$(num "${us//[^0-9]/}" 0),\"quota\":$qv,\"refquota\":$rv,\"volsize\":$vv,\"avail\":$(num "${av//[^0-9]/}" 0)}"
+  done < <(zfs list -H -p -o name,type,used,quota,refquota,avail,volsize 2>/dev/null \
+           | awk -F'\t' '($2=="volume" || $4!="none") && $1!~/@/ { print }' \
+           | sort -t$'\t' -k3,3nr | head -40)
+fi
 
 # ---------- network ----------
 NETS=''
@@ -289,6 +315,8 @@ printf '"cpu":{"model":"%s","mhz":%s,"hz":%s,"ncpu":%s,"busy":%s,"idle":%s,"load
 printf '"mem":{"total_kb":%s,"avail_kb":%s,"free_kb":%s,"buffers_kb":%s,"cached_kb":%s,"sreclaim_kb":%s,"swap_total_kb":%s,"swap_free_kb":%s},' \
   "$MT" "$MA" "$MF" "$BC" "$CA" "$SR" "$ST" "$SF"
 printf '"disks":[%s],' "$DISKS"
+printf '"zpools":[%s],' "$ZPOOLS"
+printf '"zdatasets":[%s],' "$ZDATS"
 printf '"nets":[%s],' "$NETS"
 printf '"temp":{"cpu_c":%s,"cpu_src":%s,"nvme_c":%s,"sensors":%s},' "$CT" "$CS" "$NT" "$TS"
 printf '"gpus":[%s]' "$GPUS"

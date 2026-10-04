@@ -5,7 +5,9 @@ mod widgets;
 
 use crate::model::{derive, Host, HostState, Probe};
 use crate::ssh::{run_probe_blocking, spawn_stream, Sample};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -52,7 +54,8 @@ fn parse_args() -> Args {
                      Auth uses the system ssh client: local ssh-agent, ~/.ssh/config\n\
                      identities and default keys. BatchMode: never prompts for passwords.\n\
                      Targets need bash + coreutils. Keys: a add · x remove · Tab/←→ switch ·\n\
-                     r restart streams · p pause · +/- interval · ? help · q quit"
+                     r restart streams · p pause · +/- interval · ↑↓/PgUp/PgDn/wheel scroll\n\
+                     a card that overflows (↕ in its title) · ? help · q quit"
                 );
                 std::process::exit(0);
             }
@@ -120,6 +123,12 @@ struct App {
     /// pid receivers not yet drained into streams
     pidrx: HashMap<String, mpsc::Receiver<u32>>,
     quit: bool,
+    /// per-card vertical scroll offset (lines)
+    scrolls: Vec<usize>,
+    /// per-card max scroll from last draw (line overflow)
+    card_max: Vec<usize>,
+    /// per-card rect from last draw (mouse wheel hit-test)
+    card_geoms: Vec<ui::CardGeom>,
 }
 
 fn ssh_dest(target: &str, use_root: bool) -> String {
@@ -159,6 +168,9 @@ impl App {
             active: HashSet::new(),
             pidrx: HashMap::new(),
             quit: false,
+            scrolls: Vec::new(),
+            card_max: Vec::new(),
+            card_geoms: Vec::new(),
         };
         for t in targets {
             app.add_target(t);
@@ -181,6 +193,7 @@ impl App {
         }
         self.note = None;
         self.hosts.push(Host::new(&target));
+        self.scrolls.push(0);
         self.streams.insert(target.clone(), Stream::new());
         self.spawn(target);
         self.sel = self.hosts.len() - 1;
@@ -239,10 +252,47 @@ impl App {
             }
         }
         self.pidrx.remove(&t);
-        self.hosts.remove(self.sel);
+        let idx = self.sel;
+        self.hosts.remove(idx);
+        if idx < self.scrolls.len() {
+            self.scrolls.remove(idx);
+        }
+        self.scrolls.truncate(self.hosts.len());
         if self.sel >= self.hosts.len() {
             self.sel = self.hosts.len().saturating_sub(1);
         }
+    }
+
+    /// scroll card `i` by `delta` lines (clamped; max from last draw)
+    fn scroll_card(&mut self, i: usize, delta: isize) {
+        if i >= self.hosts.len() {
+            return;
+        }
+        let max = self.card_max.get(i).copied().unwrap_or(0);
+        if self.scrolls.len() <= i {
+            self.scrolls.resize(i + 1, 0);
+        }
+        let cur = self.scrolls[i] as isize;
+        self.scrolls[i] = (cur + delta).clamp(0, max as isize) as usize;
+    }
+
+    /// jump card `i` to top (false) / bottom (true)
+    fn scroll_edge(&mut self, i: usize, bottom: bool) {
+        if i >= self.hosts.len() {
+            return;
+        }
+        let max = self.card_max.get(i).copied().unwrap_or(0);
+        if self.scrolls.len() <= i {
+            self.scrolls.resize(i + 1, 0);
+        }
+        self.scrolls[i] = if bottom { max } else { 0 };
+    }
+
+    /// which card contains viewport (x, y)?
+    fn card_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.card_geoms.iter().position(|g| {
+            x >= g.x0 && x <= g.x1 && y >= g.y0 && y <= g.y1
+        })
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -454,9 +504,13 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, args: Args) -> io::Res
     let mut app = App::new(&args.targets, args.interval);
     let mut last_draw = Instant::now();
     let mut last_tick = Instant::now();
+    // mouse wheel scrolls the card under the cursor (if the terminal reports
+    // mice at all; Shift-select still works in the terminal itself)
+    let _ = execute!(term.backend_mut(), crossterm::event::EnableMouseCapture);
 
     loop {
         if app.quit {
+            let _ = execute!(term.backend_mut(), crossterm::event::DisableMouseCapture);
             // kill all live streams so no orphan ssh clients linger
             let targets: Vec<String> = app.hosts.iter().map(|h| h.target.clone()).collect();
             for t in targets {
@@ -479,6 +533,19 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, args: Args) -> io::Res
                     handle_key(&mut app, code, modifiers);
                     last_draw = Instant::now();
                 }
+                Event::Mouse(me) => match me.kind {
+                    MouseEventKind::ScrollDown => {
+                        let i = app.card_at(me.column, me.row).unwrap_or(app.sel);
+                        app.scroll_card(i, 3);
+                        last_draw = Instant::now();
+                    }
+                    MouseEventKind::ScrollUp => {
+                        let i = app.card_at(me.column, me.row).unwrap_or(app.sel);
+                        app.scroll_card(i, -3);
+                        last_draw = Instant::now();
+                    }
+                    _ => {}
+                },
                 Event::Resize(_, _) => last_draw = Instant::now(),
                 _ => {}
             }
@@ -492,8 +559,10 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, args: Args) -> io::Res
         }
 
         if last_draw.elapsed() >= Duration::from_millis(150) {
+            let scrolls = app.scrolls.clone();
+            let mut result = (Vec::new(), Vec::new());
             term.draw(|f| {
-                ui::draw(
+                result = ui::draw(
                     f,
                     &app.hosts,
                     app.sel,
@@ -503,8 +572,19 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, args: Args) -> io::Res
                     app.pending(),
                     app.paused,
                     &app.note,
-                )
+                    &scrolls,
+                );
             })?;
+            let (maxes, geoms) = result;
+            // keep offsets honest after resize/data shrink
+            app.scrolls = scrolls;
+            for (i, mx) in maxes.iter().enumerate() {
+                if let Some(cur) = app.scrolls.get_mut(i) {
+                    *cur = (*cur).min(*mx);
+                }
+            }
+            app.card_max = maxes;
+            app.card_geoms = geoms;
             last_draw = Instant::now();
         }
     }
@@ -537,6 +617,24 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
         KeyCode::Char('?') => app.help = !app.help,
+        KeyCode::Up => {
+            app.scroll_card(app.sel, -1);
+        }
+        KeyCode::Down => {
+            app.scroll_card(app.sel, 1);
+        }
+        KeyCode::PageUp => {
+            app.scroll_card(app.sel, -5);
+        }
+        KeyCode::PageDown => {
+            app.scroll_card(app.sel, 5);
+        }
+        KeyCode::Home => {
+            app.scroll_edge(app.sel, false);
+        }
+        KeyCode::End => {
+            app.scroll_edge(app.sel, true);
+        }
         KeyCode::Tab | KeyCode::Right => {
             if !app.hosts.is_empty() {
                 app.sel = (app.sel + 1) % app.hosts.len();

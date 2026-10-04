@@ -21,6 +21,10 @@ pub struct Probe {
     #[serde(default)]
     pub disks: Vec<Disk>,
     #[serde(default)]
+    pub zpools: Vec<Zpool>,
+    #[serde(default)]
+    pub zdatasets: Vec<Dataset>,
+    #[serde(default)]
     pub nets: Vec<Net>,
     #[serde(default)]
     pub temp: Temp,
@@ -95,6 +99,43 @@ pub struct Disk {
     pub rsec: u64,
     #[serde(default)]
     pub wsec: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Zpool {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub alloc: u64,
+    #[serde(default)]
+    pub free: u64,
+    #[serde(default)]
+    pub cap: u64,
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dataset {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub r#type: String,
+    #[serde(default)]
+    pub used: u64,
+    /// -1 = no quota
+    #[serde(default)]
+    pub quota: i64,
+    /// -1 = no refquota
+    #[serde(default)]
+    pub refquota: i64,
+    /// -1 = not a volume
+    #[serde(default)]
+    pub volsize: i64,
+    #[serde(default)]
+    pub avail: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +223,8 @@ pub struct Metrics {
     pub swap_used: u64,
     pub swap_total: u64,
     pub disks: Vec<DiskStat>,
+    pub zpools: Vec<ZpoolStat>,
+    pub datasets: Vec<DatasetStat>,
     pub nets: Vec<NetStat>,
     pub gpus: Vec<GpuStat>,
     pub cpu_temp: Option<f64>,
@@ -218,6 +261,26 @@ pub struct NetStat {
     pub speed_mbps: i64,
     pub rx_total: u64,
     pub tx_total: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ZpoolStat {
+    pub name: String,
+    pub size: u64,
+    pub alloc: u64,
+    pub free: u64,
+    pub pct: f64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DatasetStat {
+    pub name: String,
+    pub vtype: String,
+    pub used: u64,
+    /// cap = quota, else refquota, else 0 (pool-shared, no own limit)
+    pub cap: u64,
+    pub pct: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -318,6 +381,52 @@ pub fn derive(cur: &Probe, prev: &Probe, dt: f64) -> Metrics {
                 size: d.size,
                 read_bps: d.rsec.saturating_sub(pr) as f64 * 512.0 / dt,
                 write_bps: d.wsec.saturating_sub(pw) as f64 * 512.0 / dt,
+            }
+        })
+        .collect();
+
+    // zfs pools: true pool capacity (df only sees the mount overhead);
+    // datasets: quota/refquota is the real per-subvol/vm limit, not pool avail
+    m.zpools = cur
+        .zpools
+        .iter()
+        .map(|z| ZpoolStat {
+            name: z.name.clone(),
+            size: z.size,
+            alloc: z.alloc,
+            free: z.free,
+            pct: if z.size > 0 {
+                (z.alloc as f64 / z.size as f64 * 100.0).clamp(0.0, 100.0)
+            } else {
+                z.cap as f64
+            },
+            state: z.state.clone(),
+        })
+        .collect();
+    m.datasets = cur
+        .zdatasets
+        .iter()
+        .map(|d| {
+            let cap = if d.quota > 0 {
+                d.quota as u64
+            } else if d.refquota > 0 {
+                d.refquota as u64
+            } else if d.volsize > 0 {
+                d.volsize as u64
+            } else {
+                0
+            };
+            let pct = if cap > 0 {
+                (d.used as f64 / cap as f64 * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            DatasetStat {
+                name: d.name.clone(),
+                vtype: d.r#type.clone(),
+                used: d.used,
+                cap,
+                pct,
             }
         })
         .collect();

@@ -27,6 +27,9 @@ Every argument is a target: `ssh` alias, hostname, IP, `user@host`, or `local` (
 |-----|--------|
 | `a` / `x` | add / remove host |
 | `1..3`, `←/→` | select host (drives detail density) |
+| `↑/↓`, `PgUp/PgDn` | scroll the focused card when it overflows (↕ shown in its title) |
+| `Home` / `End` | jump to top / bottom of the focused card |
+| mouse wheel | scroll the card under the cursor (if the terminal reports mice) |
 | `+` / `-` | stream interval 1..60s |
 | `r` | restart all streams |
 | `p` | pause (tears down SSH sessions) / resume |
@@ -45,3 +48,7 @@ One persistent SSH connection per host streams JSON frames back (~1 Hz; ~1.35s o
 ## What's collected per frame
 
 Load avg, overall + per-core CPU % and MHz, temps + sensors, RAM (used/cache/free, swap, live trend), per-mount disk usage + IO, NIC rx/tx with sparkline, and GPUs: utilization, VRAM, temp/power/fan, and compute processes with **full command lines** (from `/proc/<pid>/cmdline`) and per-process VRAM. On hosts without GPU drivers (e.g. Proxmox with cards passed through to VMs), GPUs are still listed read-only via PCI sysfs presence.
+
+ZFS hosts get the truth `df` can't give: the pool row is real device usage (`zpool list`), and Proxmox subvol/VM datasets are shown against their own `quota`/`refquota`/`volsize` — the limits Proxmox enforces — instead of the misleading pool-wide mount numbers.
+
+Cards are fully scrollable: when a host's content (long GPU argv lists, many datasets) exceeds the card height, nothing is silently dropped — the title shows `↕from-to/total` and the wheel/keys reveal the rest.

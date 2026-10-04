@@ -14,6 +14,18 @@ pub const MAX_HOSTS: usize = 3;
 
 const CORE_LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// Geometry of one host card after layout: used for mouse-scroll hit testing.
+#[derive(Clone, Copy)]
+pub struct CardGeom {
+    pub x0: u16,
+    pub x1: u16,
+    pub y0: u16,
+    pub y1: u16,
+}
+
+/// Draws the full screen. `scrolls[i]` = desired top line of card i;
+/// returns (per-card max scroll, per-card geometry) so the app can clamp
+/// stored offsets and hit-test wheel events.
 pub fn draw(
     f: &mut Frame,
     hosts: &[Host],
@@ -24,7 +36,8 @@ pub fn draw(
     pending: usize,
     paused: bool,
     note: &Option<String>,
-) {
+    scrolls: &[usize],
+) -> (Vec<usize>, Vec<CardGeom>) {
     let area = f.area();
     let chunks = Layout::vertical([
         Constraint::Length(1),                                   // header
@@ -87,6 +100,16 @@ pub fn draw(
     // ---- host cards, side by side, always visible ----
     let ncols = hosts.len().clamp(1, MAX_HOSTS);
     let cols = Layout::horizontal(vec![Constraint::Fill(1); ncols]).split(chunks[1]);
+    let mut maxscrolls = vec![0usize; ncols];
+    let geoms: Vec<CardGeom> = cols
+        .iter()
+        .map(|c| CardGeom {
+            x0: c.x,
+            x1: c.x + c.width.saturating_sub(1),
+            y0: c.y,
+            y1: c.y + c.height.saturating_sub(1),
+        })
+        .collect();
     if hosts.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -97,7 +120,8 @@ pub fn draw(
         );
     }
     for (i, h) in hosts.iter().enumerate().take(MAX_HOSTS) {
-        draw_host_card(f, cols[i], h, i == sel);
+        let sc = scrolls.get(i).copied().unwrap_or(0);
+        maxscrolls[i] = draw_host_card(f, cols[i], h, i == sel, sc);
     }
 
     // ---- status / input line ----
@@ -146,9 +170,12 @@ pub fn draw(
     if help {
         draw_help(f, area);
     }
+    (maxscrolls, geoms)
 }
 
-fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
+/// Render one host card with per-card vertical scrolling; returns the max
+/// valid scroll (line overflow) for this card at the current height.
+fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usize) -> usize {
     let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
 
@@ -163,29 +190,6 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
         "ssh:root"
     } else {
         "ssh"
-    };
-
-    let title_str = if inner_w > 30 {
-        format!(" {name} · {src_tag} ")
-    } else {
-        format!(" {name} ")
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if active { C_ACCENT } else { C_MUTED }))
-        .title(Span::styled(
-            title_str,
-            Style::default()
-                .fg(if active { C_ACCENT } else { Color::White })
-                .add_modifier(Modifier::BOLD),
-        ));
-    f.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -233,16 +237,45 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
             l.extend(sp);
             lines.push(Line::from(fit(l, inner_w)));
 
-            // per-core: one block char per core, heat-colored, with GHz tail
+            // per-core: one block char per logical CPU; HT siblings (same
+            // physical core_id) stay glued, 2-col gap between cores. GHz tail
+            // on the right; what no longer fits is marked "…".
             if !m.per_core.is_empty() {
                 let mut spans = vec![Span::styled("core ", Style::default().fg(C_MUTED))];
-                let budget = inner_w.saturating_sub(16);
-                for c in m.per_core.iter().take(budget) {
+                let tail = if m.per_core.iter().any(|c| c.mhz > 0) { 14 } else { 2 };
+                let budget = inner_w.saturating_sub(6 + tail);
+                let mut used = 0usize;
+                let mut prev_core: Option<u64> = None;
+                let mut dropped = false;
+                for c in &m.per_core {
+                    let gap = match prev_core {
+                        None => 0usize,
+                        Some(pc) => {
+                            if pc == c.core && c.core != u64::MAX {
+                                0 // HT sibling: glued to its twin
+                            } else {
+                                2 // new physical core
+                            }
+                        }
+                    };
+                    if used + gap + 1 > budget {
+                        dropped = true;
+                        break;
+                    }
+                    if gap > 0 {
+                        spans.push(Span::styled(" ".repeat(gap), Style::default().fg(C_MUTED)));
+                        used += gap;
+                    }
                     let lvl = (c.pct / 100.0 * 7.0).round().clamp(0.0, 7.0) as usize;
                     spans.push(Span::styled(
                         CORE_LEVELS[lvl].to_string(),
                         Style::default().fg(heat(c.pct)),
                     ));
+                    used += 1;
+                    prev_core = Some(c.core);
+                }
+                if dropped {
+                    spans.push(Span::styled("…", Style::default().fg(C_MUTED)));
                 }
                 let mhzs: Vec<f64> = m
                     .per_core
@@ -368,22 +401,25 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
                 lines.push(Line::from(fit(l, inner_w)));
             }
 
-            // ---- DISK: one row per mount, bar + used/size ----
+            // ---- DISK: real mounts, then ZFS truth ----
+            // df -T on ZFS lies: mounts report pool avail with near-zero used.
+            // Non-zfs mounts keep the 2-row treatment; zfs gets a pool row
+            // (real device %) + rows for datasets with a quota/refquota/volsize
+            // — the limits Proxmox actually enforces (subvols, VM disks).
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "disk",
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             )));
-            let used_so_far = lines.len();
-            let room = inner_h.saturating_sub(used_so_far + 4); // leave room for net (2) + gpu headroom
-            let max_disks = (room / 2).clamp(1, 3);
-            if m.disks.is_empty() {
+            let plain: Vec<&crate::model::DiskStat> =
+                m.disks.iter().filter(|d| d.fs != "zfs").collect();
+            if m.disks.is_empty() && m.zpools.is_empty() {
                 lines.push(Line::from(Span::styled(
                     " none",
                     Style::default().fg(C_MUTED),
                 )));
             }
-            for d in m.disks.iter().take(max_disks) {
+            for d in plain.iter().take(6) {
                 let bar_w = inner_w.saturating_sub(34).clamp(6, 16);
                 let dev: String = short_dev(&d.device).chars().take(10).collect();
                 let mut l = vec![Span::styled(
@@ -421,6 +457,115 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
                             fmt_bytesps(d.read_bps),
                             fmt_bytesps(d.write_bps)
                         ),
+                        Style::default().fg(C_MUTED),
+                    )],
+                    inner_w,
+                )));
+            }
+            if !m.zpools.is_empty() {
+                for z in m.zpools.iter().take(2) {
+                    let bar_w = inner_w.saturating_sub(30).clamp(6, 16);
+                    let label: String =
+                        format!("zpool {}", z.name).chars().take(13).collect();
+                    let mut l = vec![Span::styled(
+                        format!("{:<14}", label),
+                        Style::default()
+                            .fg(C_TEXT)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    l.extend(gauge(
+                        None,
+                        z.pct,
+                        100.0,
+                        bar_w,
+                        "%",
+                        heat(z.pct),
+                        Some(format!("{:.0}%", z.pct)),
+                    ));
+                    let size_s = format!(
+                        "{}/{} · {} free",
+                        fmt_bytes(z.alloc),
+                        fmt_bytes(z.size),
+                        fmt_bytes(z.free)
+                    );
+                    let pre: usize = l.iter().map(|s| s.content.chars().count()).sum();
+                    let pad = inner_w
+                        .saturating_sub(pre + size_s.chars().count())
+                        .clamp(1, 60);
+                    l.push(Span::styled(" ".repeat(pad), Style::default()));
+                    l.push(Span::styled(
+                        size_s,
+                        Style::default().fg(if z.state == "ONLINE" {
+                            heat(z.pct)
+                        } else {
+                            Color::Red
+                        }),
+                    ));
+                    lines.push(Line::from(fit(l, inner_w)));
+                    if z.state != "ONLINE" {
+                        lines.push(Line::from(fit(
+                            vec![Span::styled(
+                                format!("  ⚠ pool state: {}", z.state),
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            )],
+                            inner_w,
+                        )));
+                    }
+                }
+                // capped datasets: the limits Proxmox actually enforces
+                let capped: Vec<&crate::model::DatasetStat> =
+                    m.datasets.iter().filter(|d| d.cap > 0).take(8).collect();
+                for d in capped {
+                    let short: String = d
+                        .name
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&d.name)
+                        .to_string()
+                        .replace("-disk-0", "")
+                        .replace("-disk-", ":")
+                        .chars()
+                        .take(15)
+                        .collect();
+                    let tag = if d.vtype == "volume" { "vol" } else { "sub" };
+                    let size_s = format!("{}/{}", fmt_bytes(d.used), fmt_bytes(d.cap));
+                    let lbl_w = 21usize;
+                    let bar_w = inner_w
+                        .saturating_sub(lbl_w + size_s.chars().count() + 6)
+                        .clamp(4, 12);
+                    let mut l = vec![Span::styled(
+                        format!("{:<1$}", format!("[{tag}] {short}"), lbl_w),
+                        Style::default().fg(C_TEXT),
+                    )];
+                    l.extend(gauge(
+                        None,
+                        d.pct,
+                        100.0,
+                        bar_w,
+                        "%",
+                        heat(d.pct),
+                        Some(format!("{:.0}%", d.pct)),
+                    ));
+                    l.push(Span::styled(
+                        format!(" {size_s}"),
+                        Style::default().fg(heat(d.pct)),
+                    ));
+                    lines.push(Line::from(fit(l, inner_w)));
+                }
+                let uncapped = m.datasets.iter().filter(|d| d.cap == 0).count();
+                if uncapped > 0 {
+                    lines.push(Line::from(fit(
+                        vec![Span::styled(
+                            format!("  +{} datasets w/o own limit (pool-shared)", uncapped),
+                            Style::default().fg(C_MUTED),
+                        )],
+                        inner_w,
+                    )));
+                }
+            } else if m.disks.iter().any(|d| d.fs == "zfs") {
+                lines.push(Line::from(fit(
+                    vec![Span::styled(
+                        "  zfs: pool stats n/a (zpool list needs root)",
                         Style::default().fg(C_MUTED),
                     )],
                     inner_w,
@@ -466,16 +611,14 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
                 lines.push(Line::from(fit(spans, inner_w)));
             }
 
-            // ---- GPU (per-card, compact) ----
+            // ---- GPU: every card, every compute proc. Nothing is dropped for
+            // lack of vertical room anymore — the card scrolls (↕ in its title).
             if !m.gpus.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "gpu ",
                     Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                 )));
-                for g in m.gpus.iter().take(2) {
-                    if lines.len() + 2 > inner_h {
-                        break;
-                    }
+                for g in m.gpus.iter().take(4) {
                     let short_name: String = g
                         .name
                         .replace("NVIDIA GeForce ", "")
@@ -561,36 +704,20 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
                             Style::default().fg(C_MUTED),
                         )));
                     } else {
-                        let avail = inner_h.saturating_sub(lines.len()).saturating_sub(1);
                         let head_w = 19usize; // "{:>5}MB {:<10} "
                         let cmd_w = inner_w.saturating_sub(head_w).max(8);
-                        let wrapped: Vec<Vec<String>> =
-                            g.procs.iter().map(|pr| wrap_cmd(&pr.name, cmd_w)).collect();
-                        // pack whole procs so wrapped rows never spill into each other
-                        let mut shown = 0usize;
-                        let mut rows_used = 0usize;
-                        for ws in &wrapped {
-                            if rows_used + ws.len() > avail {
-                                break;
-                            }
-                            shown += 1;
-                            rows_used += ws.len();
-                        }
-                        let shown = if shown == 0 && !g.procs.is_empty() {
-                            1
-                        } else {
-                            shown
-                        };
-                        for (pr, ws) in g.procs.iter().zip(wrapped.iter()).take(shown) {
+                        let cap_show = 16usize;
+                        for pr in g.procs.iter().take(cap_show) {
+                            let ws = wrap_cmd(&pr.name, cmd_w);
                             let usr: String = pr.user.chars().take(10).collect();
                             let head = format!("{:>5}MB {:<10} ", pr.mem_mb, usr);
                             for (li, chunk) in ws.iter().enumerate() {
                                 emit_proc(&mut lines, &head, li == 0, chunk, inner_w, head_w);
                             }
                         }
-                        if g.procs.len() > shown {
+                        if g.procs.len() > cap_show {
                             lines.push(Line::from(Span::styled(
-                                format!("  … {} more", g.procs.len() - shown),
+                                format!("  … {} more", g.procs.len() - cap_show),
                                 Style::default().fg(C_MUTED),
                             )));
                         }
@@ -628,9 +755,41 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool) {
         }
     }
 
-    lines.truncate(inner_h);
-    let para = Paragraph::new(lines);
+    // ---- scrollable render ----
+    let overflow = lines.len().saturating_sub(inner_h);
+    let eff_scroll = scroll.min(overflow);
+    let title_str = if inner_w > 30 {
+        format!(" {name} · {src_tag} ")
+    } else {
+        format!(" {name} ")
+    };
+    let title_str = if overflow > 0 {
+        let lo = eff_scroll + 1;
+        let hi = (eff_scroll + inner_h).min(lines.len());
+        format!("{title_str}↕{lo}-{hi}/{} ", lines.len())
+    } else {
+        title_str
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if active { C_ACCENT } else { C_MUTED }))
+        .title(Span::styled(
+            title_str,
+            Style::default()
+                .fg(if active { C_ACCENT } else { Color::White })
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let para = Paragraph::new(lines).scroll((eff_scroll as u16, 0));
     f.render_widget(para, inner);
+    overflow
 }
 
 /// One segmented full-width bar: proportional colored blocks, no gaps, no
@@ -736,7 +895,7 @@ fn wrap_cmd(name: &str, w: usize) -> Vec<String> {
 
 fn draw_help(f: &mut Frame, area: Rect) {
     let w = 74u16.min(area.width.saturating_sub(4));
-    let h = 15u16.min(area.height.saturating_sub(2));
+    let h = 20u16.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect::new(x, y, w, h);
@@ -750,6 +909,9 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from(" ←→/Tab   cycle focus (highlight)  1/2/3  select card"),
         Line::from(" x/Del    drop focused card        r    restart all streams"),
         Line::from(" +/-      stream interval 1..60s   p    pause / resume"),
+        Line::from(" ↑↓/PgUp/PgDn   scroll focused card (↕ lines in its title)"),
+        Line::from(" Home/End jump to top / bottom of the focused card"),
+        Line::from(" wheel    scroll the card under the mouse (if reported)"),
         Line::from(" ? this help        q / Ctrl-C quit"),
         Line::from(""),
         Line::from(Span::styled(
@@ -758,6 +920,14 @@ fn draw_help(f: &mut Frame, area: Rect) {
         )),
         Line::from(Span::styled(
             " gpu bar:  purple = vram in use.        widths are true fractions",
+            Style::default().fg(C_TEXT),
+        )),
+        Line::from(Span::styled(
+            " zfs:  pool row = real device use (df lies on ZFS); sub/vol rows",
+            Style::default().fg(C_TEXT),
+        )),
+        Line::from(Span::styled(
+            "       show quota/refquota/volsize — the limits Proxmox enforces.",
             Style::default().fg(C_TEXT),
         )),
         Line::from(Span::styled(
