@@ -55,7 +55,7 @@ def hexcol(x):
 
 def _find_font(name):
     """Locate a mono TTF: env override, then common font dirs + repo assets/."""
-    env = os.environ.get("SKIMO_FONT_" + name.replace("-", "_").upper())
+    env = os.environ.get("SKIMO_FONT_" + name.replace("-", "_").upper())  # e.g. SKIMO_FONT_JETBRAINSMONO_REGULAR
     if env and os.path.exists(os.path.expanduser(env)):
         return os.path.expanduser(env)
     cands = []
