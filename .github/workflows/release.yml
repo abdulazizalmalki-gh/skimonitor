@@ -32,13 +32,17 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar czf skimonitor-${{ github.ref_name }}-${{ matrix.arch }}.tar.gz skimonitor
-          shasum -a 256 skimonitor-${{ github.ref_name }}-${{ matrix.arch }}.tar.gz > sha256sums.txt
+          if command -v sha256sum >/dev/null; then
+            sha256sum skimonitor-${{ github.ref_name }}-${{ matrix.arch }}.tar.gz > sha256sums-${{ matrix.arch }}.txt
+          else
+            shasum -a 256 skimonitor-${{ github.ref_name }}-${{ matrix.arch }}.tar.gz > sha256sums-${{ matrix.arch }}.txt
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: skimonitor-${{ matrix.arch }}
           path: |
-            target/${{ matrix.target }}/release/*.tar.gz
-            target/${{ matrix.target }}/release/sha256sums.txt
+            target/${{ matrix.target }}/release/skimonitor-*.tar.gz
+            target/${{ matrix.target }}/release/sha256sums-*.txt
   publish:
     needs: build
     runs-on: ubuntu-latest
