@@ -490,6 +490,8 @@ pub enum HostState {
 pub struct Host {
     pub target: String,
     pub label: String,
+    /// frame came from the built-in demo replay, not ssh
+    pub as_demo: bool,
     /// the live stream is connected as root@host (auth fallback)
     pub as_root: bool,
     pub state: HostState,
@@ -512,6 +514,7 @@ impl Host {
         Self {
             target: target.to_string(),
             label,
+            as_demo: false,
             as_root: false,
             state: HostState::Connecting,
             last_error: None,
@@ -578,8 +581,7 @@ pub fn fmt_bps(b: f64) -> String {
 }
 
 pub fn fmt_bytesps(b: f64) -> String {
-    let kb = b / 1024.0;
-    fmt_bytes(kb as u64) + "/s"
+    fmt_bytes(b as u64) + "/s"
 }
 
 pub fn fmt_uptime(s: u64) -> String {

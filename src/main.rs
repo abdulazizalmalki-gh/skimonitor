@@ -1,3 +1,4 @@
+mod demo;
 mod model;
 mod ssh;
 mod ui;
@@ -24,12 +25,14 @@ struct Args {
     targets: Vec<String>,
     interval: u64,
     once: bool,
+    demo: bool,
 }
 
 fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut interval = 1u64;
     let mut once = false;
+    let mut demo = false;
     let mut targets: Vec<String> = Vec::new();
     let mut i = 0;
     while i < argv.len() {
@@ -42,13 +45,15 @@ fn parse_args() -> Args {
                 }
             }
             "--once" | "-o" => once = true,
+            "--demo" => demo = true,
             "-h" | "--help" => {
                 println!(
                     "skimonitor — multi-host SSH monitor TUI (streaming)\n\n\
                      usage: skimonitor [options] [host ...]\n\
                      \x20 host        user@hostname, ~/.ssh/config alias, or IP; 'local' self-scans\n\
                      \x20 -i SECONDS  stream frame interval (default 1)\n\
-                     \x20 --once      probe each host once, print summary, exit (no TUI)\n\n\
+                     \x20 --once      probe each host once, print summary, exit (no TUI)\n\
+                     \x20 --demo      replay invented hosts through the real UI (no ssh, no data)\n\n\
                      One persistent ssh connection per host streams one JSON frame per\n\
                      second; dead streams reconnect automatically with backoff.\n\
                      Auth uses the system ssh client: local ssh-agent, ~/.ssh/config\n\
@@ -77,6 +82,7 @@ fn parse_args() -> Args {
         targets,
         interval,
         once,
+        demo,
     }
 }
 
@@ -111,6 +117,8 @@ struct App {
     hosts: Vec<Host>,
     sel: usize,
     interval: u64,
+    /// true = hosts are fed by the built-in demo replay, no ssh at all
+    demo: bool,
     paused: bool,
     help: bool,
     input: Option<String>,
@@ -152,12 +160,13 @@ fn kill_pid(pid: u32) {
 }
 
 impl App {
-    fn new(targets: &[String], interval: u64) -> Self {
+    fn new(targets: &[String], interval: u64, demo: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         let mut app = Self {
             hosts: Vec::new(),
             sel: 0,
             interval,
+            demo,
             paused: false,
             help: false,
             input: None,
@@ -174,6 +183,20 @@ impl App {
         };
         for t in targets {
             app.add_target(t);
+        }
+        if demo {
+            // fake hosts feed the same channel real streams would use; mark
+            // their (target, epoch 0) active so samples apply without spawning ssh
+            for h in app.hosts.iter_mut() {
+                h.as_demo = true;
+            }
+            let ts: Vec<String> = app.hosts.iter().map(|h| h.target.clone()).collect();
+            for t in ts {
+                if let Some(st) = app.streams.get_mut(&t) {
+                    st.last_frame = Instant::now();
+                    app.active.insert((t.clone(), st.epoch));
+                }
+            }
         }
         app.sel = 0;
         app
@@ -195,7 +218,9 @@ impl App {
         self.hosts.push(Host::new(&target));
         self.scrolls.push(0);
         self.streams.insert(target.clone(), Stream::new());
-        self.spawn(target);
+        if !self.demo {
+            self.spawn(target);
+        }
         self.sel = self.hosts.len() - 1;
     }
 
@@ -390,7 +415,7 @@ impl App {
 
     /// supervision: restart dead streams + watchdog stale ones
     fn tick(&mut self) {
-        if self.paused {
+        if self.paused || self.demo {
             return;
         }
         let now = Instant::now();
@@ -455,7 +480,15 @@ fn apply_probe(h: &mut Host, probe: Probe) {
 }
 
 fn main() -> io::Result<()> {
-    let args = parse_args();
+    let mut args = parse_args();
+    if args.demo {
+        // demo mode ignores given targets: the three invented hosts ARE the demo
+        args.targets = demo::DEMO_HOSTS.iter().map(|h| h.target.to_string()).collect();
+    }
+    if args.once && args.demo {
+        eprintln!("--demo is a TUI replay; drop --once");
+        std::process::exit(2);
+    }
     if args.once {
         let mut failed = 0usize;
         for t in &args.targets {
@@ -501,7 +534,10 @@ fn main() -> io::Result<()> {
 }
 
 fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, args: Args) -> io::Result<()> {
-    let mut app = App::new(&args.targets, args.interval);
+    let mut app = App::new(&args.targets, args.interval, args.demo);
+    if args.demo {
+        demo::run(demo::DEMO_HOSTS, args.interval.max(1), app.tx.clone());
+    }
     let mut last_draw = Instant::now();
     let mut last_tick = Instant::now();
     // mouse wheel scrolls the card under the cursor (if the terminal reports

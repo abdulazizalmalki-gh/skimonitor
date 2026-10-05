@@ -1,0 +1,18 @@
+name: ci
+on:
+  push:
+    branches: [master]
+    paths-ignore: ["docs/**", "README.md", "LICENSE"]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo test
+      - name: probe syntax check
+        run: bash -n probe.sh
+      - name: smoke (local host, one frame)
+        run: ./target/release/skimonitor --once local

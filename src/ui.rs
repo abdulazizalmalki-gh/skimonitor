@@ -125,6 +125,7 @@ pub fn draw(
     }
 
     // ---- status / input line ----
+    let demo_mode = hosts.iter().any(|h| h.as_demo);
     if let Some(buf) = input {
         let line = Line::from(vec![
             Span::styled(
@@ -146,8 +147,16 @@ pub fn draw(
                 Style::default().fg(C_MUTED),
             ),
             Span::styled(
-                "auth: keys on this machine (ssh BatchMode, never prompts)",
-                Style::default().fg(C_MUTED),
+                if demo_mode {
+                    "DEMO REPLAY — invented hosts, fabricated numbers, no ssh"
+                } else {
+                    "auth: keys on this machine (ssh BatchMode, never prompts)"
+                },
+                Style::default().fg(if demo_mode {
+                    Color::Yellow
+                } else {
+                    C_MUTED
+                }),
             ),
         ];
         if paused {
@@ -186,6 +195,8 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
         .unwrap_or_else(|| h.label.clone());
     let src_tag = if crate::ssh::is_local(&h.target) {
         "local"
+    } else if h.as_demo {
+        "demo"
     } else if h.as_root {
         "ssh:root"
     } else {
@@ -652,9 +663,11 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                         )];
                         let name_w = short_name.chars().count() + 1;
                         let vram_txt = format!(" {:.1}/{:.1}Gi", vu / 1024.0, vt / 1024.0);
+                        // fill every cell left between name and readout — no cap:
+                        // a short fixed bar made the VRAM row look truncated on wide cards
                         let bar_w = inner_w
                             .saturating_sub(name_w + vram_txt.chars().count())
-                            .clamp(6, 18);
+                            .max(6);
                         vl.extend(stacked_bar(
                             bar_w,
                             &[(vu, Color::Magenta, ""), (vf, Color::Rgb(60, 60, 60), "")],
