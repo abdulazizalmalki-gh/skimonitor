@@ -5,12 +5,27 @@
 set -u
 export LC_ALL=C
 
-jstr() { # $1 -> JSON-safe string (escapes \ and ", drops control chars)
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g'
+jstr() { # $1 -> JSON-safe string. Escapes \ and ", encodes tab/newline/CR as
+  # \t \n \r, drops remaining C0 controls + DEL. Pure bash: sed is line-based
+  # and would pass an embedded newline straight through the JSON string.
+  local s=$1 c
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  for c in $'\001' $'\002' $'\003' $'\004' $'\005' $'\006' $'\007' $'\010' \
+           $'\013' $'\014' $'\016' $'\017' $'\020' $'\021' $'\022' $'\023' \
+           $'\024' $'\025' $'\026' $'\027' $'\030' $'\031' $'\032' $'\033' \
+           $'\034' $'\035' $'\036' $'\037' $'\177'; do
+    s=${s//$c/}
+  done
+  printf '%s' "$s"
 }
-num() { # $1 -> sanitized numeric or 0 (also maps -1 sentinel -> 0 via $2=0)
+num() { # $1 -> sanitized numeric, or $2 if given, else 0. Note ${2-0} not ${2:-0}:
+  # an explicitly passed empty fallback must stay empty (nz maps it to null).
   local v=${1//[^0-9.eE+-]/}
-  [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && printf '%s' "$v" || printf '%s' "${2:-0}"
+  [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && printf '%s' "$v" || printf '%s' "${2-0}"
 }
 nz() { # numeric-or-null (non-numeric / negative / empty -> null)
   local raw=${1:-} v
@@ -40,13 +55,15 @@ while read -r line; do
 done < /proc/stat
 NCPU=${#CPUS[@]}
 
-# aggregate line
+# aggregate line — SAME accounting as the per-core loop below:
+# idle = idle+iowait; busy = user+nice+system+irq+softirq+steal.
+# guest/guest_nice are already inside user/nice and must not be added again.
 AGG_BUSY=0; AGG_IDLE=0
 while read -r line; do
   [[ $line == cpu\ * ]] || continue
   set -- $line
-  AGG_IDLE=$(( ${5:-0} + ${6:-0} + ${7:-0} + ${8:-0} + ${9:-0} + ${10:-0} ))
-  AGG_BUSY=$(( ${2:-0} + ${3:-0} + ${4:-0} ))
+  AGG_IDLE=$(( ${5:-0} + ${6:-0} ))
+  AGG_BUSY=$(( ${2:-0} + ${3:-0} + ${4:-0} + ${7:-0} + ${8:-0} + ${9:-0} ))
   break
 done < /proc/stat
 
@@ -143,7 +160,7 @@ if command -v zfs >/dev/null 2>&1; then
     [ -n "$ZDATS" ] && ZDATS+=','
     ZDATS+="{\"name\":\"$(jstr "$nm")\",\"type\":\"$(jstr "$ty")\",\"used\":$(num "${us//[^0-9]/}" 0),\"quota\":$qv,\"refquota\":$rv,\"volsize\":$vv,\"avail\":$(num "${av//[^0-9]/}" 0)}"
   done < <(zfs list -H -p -o name,type,used,quota,refquota,avail,volsize 2>/dev/null \
-           | awk -F'\t' '($2=="volume" || $4!="none") && $1!~/@/ { print }' \
+           | awk -F'\t' '($2=="volume" || ($4!="none" && $4!="-") || ($5!="none" && $5!="-")) && $1!~/@/ { print }' \
            | sort -t$'\t' -k3,3nr | head -40)
 fi
 

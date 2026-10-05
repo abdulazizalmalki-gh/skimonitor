@@ -12,6 +12,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
       - run: cargo test
+      - name: probe smoke + unit tests
+        run: bash dev/test_probe.sh
       - name: probe syntax check
         run: bash -n probe.sh
       - name: smoke (local host, one frame)

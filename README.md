@@ -57,7 +57,7 @@ skimonitor --demo
 
 skimonitor shells out to your system `ssh` client, so it uses exactly the keys that already live on the machine running it: `ssh-agent`, `~/.ssh/config` (aliases, `IdentityFile`), and every private key found in `~/.ssh` — including non-default filenames, which plain `ssh` would never offer. `BatchMode=yes` + publickey-only means it can never hang waiting for a password nobody typed.
 
-Nothing is stored, sent anywhere, or logged. If a host refuses your user and you didn't pin one, skimonitor retries once as `root@host` and labels the card `ssh:root`.
+Nothing is stored by skimonitor or sent anywhere except the hosts you target. One honest exception, inherited from standard ssh: first-seen host keys are accepted and written to your `~/.ssh/known_hosts` (`accept-new`). skimonitor is also not an ssh sandbox — your own `~/.ssh/config` behavior (proxies, forwarding) applies. If a host refuses your user and you didn't pin one, skimonitor retries once as `root@host` and labels the card `ssh:root`.
 
 ## Keys
 
@@ -114,7 +114,7 @@ dev/capture_tui.py + dev/render_shot.py   screenshot pipeline for docs/
 
 ## Privacy
 
-skimonitor reads what a shell session could already read on a host you can SSH to, keeps it in RAM for the lifetime of the terminal, and never writes it anywhere. No telemetry, no updates, no network calls except the SSH connections you asked for. Release binaries are built with `--remap-path-prefix`, so they contain no build-machine paths.
+skimonitor reads what a shell session could already read on a host you can SSH to, keeps it in RAM for the lifetime of the terminal, and never writes metrics anywhere. No telemetry, no updates, no network calls except the SSH connections you asked for (host-key acceptance to `known_hosts` is standard ssh behavior and the only local write). Note: GPU process command lines are shown verbatim — if you put secrets in argv, they'll be visible on the screen, same as `ps`. Release binaries are built with `--remap-path-prefix`, so they contain no build-machine paths.
 
 ## License
 

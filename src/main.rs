@@ -29,6 +29,10 @@ struct Args {
 }
 
 fn parse_args() -> Args {
+    fn die(msg: &str) -> ! {
+        eprintln!("skimonitor: {msg}\n(try --help)");
+        std::process::exit(2);
+    }
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut interval = 1u64;
     let mut once = false;
@@ -39,9 +43,18 @@ fn parse_args() -> Args {
         let a = argv[i].as_str();
         match a {
             "-i" | "--interval" => {
-                if let Some(v) = argv.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
-                    interval = v.clamp(1, 60);
-                    i += 1;
+                // a missing or non-numeric value is an error, not a target
+                match argv.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    Some(v) => {
+                        interval = v.clamp(1, 60);
+                        i += 1;
+                    }
+                    None => match argv.get(i + 1) {
+                        None => die("-i needs a value in seconds (1..60)"),
+                        Some(bad) => die(&format!(
+                            "-i needs a number in seconds (1..60), got '{bad}'"
+                        )),
+                    },
                 }
             }
             "--once" | "-o" => once = true,
@@ -65,6 +78,11 @@ fn parse_args() -> Args {
                 std::process::exit(0);
             }
             _ => {
+                // never treat an option-shaped argument as a target: it would
+                // reach ssh's argv and could smuggle flags
+                if a.starts_with('-') {
+                    die(&format!("unknown option '{a}'"));
+                }
                 for t in a.split([',', ';', ' ']) {
                     let t = t.trim();
                     if !t.is_empty() {

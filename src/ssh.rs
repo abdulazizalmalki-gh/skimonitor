@@ -21,8 +21,39 @@ pub fn is_local(target: &str) -> bool {
     if t.eq_ignore_ascii_case("local") {
         return true;
     }
-    let h = t.rsplit('@').next().unwrap_or(t);
-    h == "localhost" || h == "127.0.0.1" || h == "::1"
+    // a pinned user means the caller wants THAT session; running the probe
+    // locally instead would silently monitor this process's env and label
+    // it as the requested user (nonexistent@127.0.0.1 "worked" that way)
+    if t.contains('@') {
+        return false;
+    }
+    t == "localhost" || t == "127.0.0.1" || t == "::1"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local;
+    #[test]
+    fn plain_local_forms() {
+        assert!(is_local("local"));
+        assert!(is_local("LOCAL"));
+        assert!(is_local("localhost"));
+        assert!(is_local("127.0.0.1"));
+        assert!(is_local("::1"));
+    }
+    #[test]
+    fn pinned_user_is_never_local() {
+        // user@loopback must go through ssh (the requested session), not the
+        // current process's environment — see audit finding on this.
+        assert!(!is_local("nonexistent@127.0.0.1"));
+        assert!(!is_local("root@localhost"));
+        assert!(!is_local("deploy@example.com"));
+    }
+    #[test]
+    fn remotes_are_not_local() {
+        assert!(!is_local("web-01.example"));
+        assert!(!is_local("192.0.2.7"));
+    }
 }
 
 /// Private key files residing in ~/.ssh (non-default names included).
@@ -121,7 +152,9 @@ fn ssh_cmd(target: &str) -> Command {
         .arg("-o")
         .arg("NumberOfPasswordPrompts=0");
     with_local_identities(&mut c);
-    c.arg("-T").arg(target);
+    // "--" ends option parsing: a target that starts with "-" can never be
+    // reinterpreted by ssh as a flag (e.g. -oProxyCommand=...)
+    c.arg("-T").arg("--").arg(target);
     c
 }
 
@@ -212,18 +245,27 @@ pub fn spawn_stream(
             thread::spawn(move || {
                 if let Some(mut se) = se.take() {
                     use std::io::Read;
+                    // keep the tail as bytes: slicing a String at len-400 can
+                    // land inside a UTF-8 char (non-ASCII ssh stderr panicked
+                    // here); decode after trimming, then take char-safe tail.
+                    let mut acc: Vec<u8> = Vec::new();
                     let mut buf = [0u8; 512];
-                    let mut acc = String::new();
                     while let Ok(n) = se.read(&mut buf) {
                         if n == 0 {
                             break;
                         }
-                        acc.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        if acc.len() > 400 {
-                            acc.drain(..acc.len() - 400);
+                        acc.extend_from_slice(&buf[..n]);
+                        if acc.len() > 2048 {
+                            acc.drain(..acc.len() - 2048);
                         }
+                        let txt = String::from_utf8_lossy(&acc)
+                            .chars()
+                            .rev()
+                            .take(400)
+                            .collect::<String>();
+                        let txt = txt.chars().rev().collect::<String>();
                         let mut t = tail.lock().unwrap();
-                        *t = acc.clone();
+                        *t = txt;
                     }
                 }
             });
@@ -317,7 +359,9 @@ fn ssh_cmd_stream(target: &str) -> Command {
         .arg("-o")
         .arg("NumberOfPasswordPrompts=0");
     with_local_identities(&mut c);
-    c.arg("-T").arg(target);
+    // "--" ends option parsing (same guard as ssh_cmd): interactive adds
+    // (key 'a') bypass CLI validation, so this is the real chokepoint
+    c.arg("-T").arg("--").arg(target);
     c
 }
 
@@ -350,15 +394,30 @@ pub fn run_probe_blocking(target: &str, sshdest: &str, timeout: Duration) -> Res
         c
     };
 
+    // Drain stdout/stderr on reader threads WHILE waiting: a child that emits
+    // more than the pipe capacity (huge hostname/argv frames, verbose stderr)
+    // would otherwise block on write before it can exit — the classic
+    // wait-then-read deadlock. Threads hit EOF as soon as the child dies
+    // (normally or via kill below), so the joins after the loop are safe.
+    use std::io::Read;
+    let mut child_stdout = child.stdout.take().expect("stdout piped");
+    let mut child_stderr = child.stderr.take().expect("stderr piped");
+    let so_h = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = child_stdout.read_to_end(&mut v);
+        v
+    });
+    let se_h = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = child_stderr.read_to_end(&mut v);
+        v
+    });
+
     // poll with deadline so a hung ssh can't wedge the sampler
     let start = Instant::now();
-    let out = loop {
+    loop {
         match child.try_wait() {
-            Ok(Some(_status)) => {
-                break child
-                    .wait_with_output()
-                    .map_err(|e| format!("read output: {e}"))?
-            }
+            Ok(Some(_status)) => break,
             Ok(None) => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
@@ -369,6 +428,18 @@ pub fn run_probe_blocking(target: &str, sshdest: &str, timeout: Duration) -> Res
             }
             Err(e) => return Err(format!("wait: {e}")),
         }
+    }
+    let status = child.wait().map_err(|e| format!("wait: {e}"))?;
+    let stdout = so_h
+        .join()
+        .map_err(|_| "stdout reader panicked".to_string())?;
+    let stderr = se_h
+        .join()
+        .map_err(|_| "stderr reader panicked".to_string())?;
+    let out = std::process::Output {
+        status,
+        stdout,
+        stderr,
     };
 
     if !out.status.success() {
