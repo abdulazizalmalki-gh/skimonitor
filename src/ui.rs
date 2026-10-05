@@ -53,6 +53,10 @@ pub fn draw(
             Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
+            format!("v{} ", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(C_MUTED),
+        ),
+        Span::styled(
             format!("stream {}s · {} host(s) ", interval_s, hosts.len()),
             Style::default().fg(C_TEXT),
         ),
