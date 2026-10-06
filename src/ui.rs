@@ -1,5 +1,5 @@
 use crate::model::{fmt_bps, fmt_bytes, fmt_bytes_kb, fmt_bytesps, fmt_uptime, Host, HostState};
-use crate::widgets::{gauge, heat, heat_temp, sparkline};
+use crate::widgets::{gauge, heat, heat_bright, heat_temp, spark_cells_abs, sparkline};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -674,14 +674,17 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
 
                         // ---- compute / VRAM / power: three level bars on ONE
                         // shared grid, stacked directly on top of each other.
-                        // Each row = fixed label | bar | trend | right-aligned
-                        // value, all three with the SAME widths, so every bar
-                        // starts and ends at exactly the same cells.
+                        // Each row = label | bar-with-embedded-trend | value,
+                        // all three with the SAME widths, so every bar starts
+                        // and ends at exactly the same cells. The trend lives
+                        // INSIDE the bar: braille history punched as dark dots
+                        // over the bright fill and mid-grey dots over the dark
+                        // track — level and history in one glanceable cell run.
                         let vt = g.mem_total_mb.max(1) as f64;
                         let vu = g.mem_used_mb as f64;
-                        let vf = (vt - vu).max(0.0);
                         let up = g.util.clamp(0.0, 100.0);
-                        let track = Color::Rgb(60, 60, 60);
+                        let track = Color::Rgb(55, 55, 55);
+                        let dot_off = Color::Rgb(140, 140, 140);
                         // power as % of the card's cap: the only scale that is
                         // comparable between cards of different TDPs
                         let pwr = match (g.power_w, g.power_cap_w) {
@@ -706,17 +709,9 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                             .max()
                             .unwrap_or(6)
                             .max(6);
-                        // trend column: identical width on every row; dropped
-                        // entirely on cards too narrow for a 6-cell sparkline
-                        let mut trend_w = inner_w.saturating_sub(lbl_w + val_w + 1 + 12).min(20);
-                        if trend_w < 6 {
-                            trend_w = 0;
-                        }
-                        // always one cell of air between bar and value, even
-                        // when the trend column collapses on narrow cards
-                        let bar_w = inner_w
-                            .saturating_sub(lbl_w + trend_w + 1 + val_w)
-                            .max(4);
+                        // the bar owns the whole run between label and value
+                        // (trend lives inside it now, no separate trend column)
+                        let bar_w = inner_w.saturating_sub(lbl_w + val_w + 2).max(8);
                         let hist = |pool: &Vec<(u64, std::collections::VecDeque<f64>)>| -> Vec<f64> {
                             pool.iter()
                                 .find(|(i, _)| *i == g.idx)
@@ -726,69 +721,52 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                         lines.push(Line::from(fit(
                             gpu_metric_row(
                                 "cmp",
-                                &stacked_bar(
-                                    bar_w,
-                                    &[(up, heat(up), ""), (100.0 - up, track, "")],
-                                    100.0,
-                                ),
+                                up,
+                                heat_bright(up),
                                 &hist(&h.hist_gpu_util),
-                                trend_w,
-                                heat(up),
+                                bar_w,
                                 &val_cmp,
                                 val_w,
-                                heat(up),
+                                heat_bright(up),
+                                track,
+                                dot_off,
                             ),
                             inner_w,
                         )));
                         lines.push(Line::from(fit(
                             gpu_metric_row(
                                 "mem",
-                                &stacked_bar(
-                                    bar_w,
-                                    &[(vu, Color::Magenta, ""), (vf, track, "")],
-                                    vt,
-                                ),
+                                vu / vt * 100.0,
+                                Color::LightMagenta,
                                 &hist(&h.hist_gpu_vram),
-                                trend_w,
-                                heat(vu / vt * 100.0),
+                                bar_w,
                                 &val_mem,
                                 val_w,
                                 C_TEXT,
+                                track,
+                                dot_off,
                             ),
                             inner_w,
                         )));
                         // power row collapses when the vendor reports no watts
                         // (e.g. AMD sysfs) — absent metric, absent row
                         if g.power_w.is_some() {
-                            let (p_bar, p_pct) = match &pwr {
-                                Some((p, c, pct)) => (
-                                    stacked_bar(
-                                        bar_w,
-                                        &[
-                                            (p.min(*c), heat(*pct), ""),
-                                            ((c - p.min(*c)).max(0.0), track, ""),
-                                        ],
-                                        *c,
-                                    ),
-                                    *pct,
-                                ),
-                                // watts but no cap: no honest fraction to draw,
-                                // so keep the row symmetric with an empty track
-                                None => (
-                                    stacked_bar(bar_w, &[(0.0, track, "")], 1.0),
-                                    0.0,
-                                ),
+                            let p_pct = match &pwr {
+                                Some((_, _, pct)) => *pct,
+                                None => 0.0,
                             };
                             lines.push(Line::from(fit(
                                 gpu_metric_row(
                                     "pwr",
-                                    &p_bar,
+                                    p_pct,
+                                    heat_bright(p_pct),
                                     &hist(&h.hist_gpu_pow),
-                                    trend_w,
-                                    heat(p_pct),
+                                    bar_w,
                                     &val_pwr,
                                     val_w,
                                     C_TEXT,
+                                    track,
+                                    dot_off,
                                 ),
                                 inner_w,
                             )));
@@ -911,37 +889,38 @@ fn stacked_bar(w: usize, parts: &[(f64, Color, &str)], total: f64) -> Vec<Span<'
     spans
 }
 
-/// One GPU metric row on the shared bar grid: 4-cell label, the level bar,
-/// a trend sparkline (only when >=2 samples exist), then the value padded to
-/// the common value width. All three GPU bars use this so they line up.
+/// One GPU metric row on the shared bar grid: 4-cell label, the level bar
+/// with its trend embedded cell-by-cell (dark braille dots over the fill,
+/// mid-grey dots over the empty track), then the value padded to the common
+/// width. All three GPU bars use this so they line up cell-for-cell.
 fn gpu_metric_row(
     label: &str,
-    bar: &[Span<'static>],
+    pct: f64,
+    fill_col: Color,
     hist: &[f64],
-    trend_w: usize,
-    trend_col: Color,
+    bar_w: usize,
     value: &str,
     val_w: usize,
     val_col: Color,
+    track: Color,
+    dot_off: Color,
 ) -> Vec<Span<'static>> {
     let mut spans = vec![Span::styled(
         format!("{:<4}", label),
         Style::default().fg(C_MUTED),
     )];
-    spans.extend(bar.iter().cloned());
-    if trend_w > 0 {
-        if hist.len() >= 2 {
-            let (sp, _) = sparkline(hist, trend_w, trend_col);
-            spans.extend(sp);
+    let trend = spark_cells_abs(hist, bar_w);
+    let tc: Vec<char> = trend.chars().collect();
+    let filled = (pct.clamp(0.0, 100.0) / 100.0 * bar_w as f64).round() as usize;
+    for i in 0..bar_w {
+        let ch = tc.get(i).copied().unwrap_or(' ');
+        let style = if i < filled {
+            Style::default().fg(Color::Black).bg(fill_col)
         } else {
-            spans.push(Span::styled(
-                " ".repeat(trend_w),
-                Style::default().fg(C_MUTED),
-            ));
-        }
+            Style::default().fg(dot_off).bg(track)
+        };
+        spans.push(Span::styled(ch.to_string(), style));
     }
-    // one cell of air before the value, always — even when the trend column
-    // collapsed, so the readout never glues itself to the bar
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
         format!("{:>val_w$}", value),
@@ -1056,6 +1035,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
         )),
         Line::from(Span::styled(
             " gpu bars:   cmp=compute · mem=vram (purple) · pwr=watts of cap.",
+            Style::default().fg(C_TEXT),
+        )),
+        Line::from(Span::styled(
+            "             dots inside the bar = recent trend (dark=fill, grey=track).",
             Style::default().fg(C_TEXT),
         )),
         Line::from(Span::styled(

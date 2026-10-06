@@ -15,6 +15,18 @@ pub fn heat(pct: f64) -> Color {
     }
 }
 
+/// bright heat color — for segments that sit ON a colored background,
+/// where the plain ANSI Green/Yellow/Red read too dim to notice
+pub fn heat_bright(pct: f64) -> Color {
+    if pct >= 85.0 {
+        Color::LightRed
+    } else if pct >= 60.0 {
+        Color::LightYellow
+    } else {
+        Color::LightGreen
+    }
+}
+
 /// heat color for temperature in °C
 pub fn heat_temp(t: f64) -> Color {
     if t >= 85.0 {
@@ -112,12 +124,7 @@ pub fn sparkline(values: &[f64], width_cells: usize, color: Color) -> (Vec<Span<
     if width_cells == 0 {
         return (vec![], 0.0);
     }
-    let n = width_cells * 2;
-    let mut data: Vec<f64> = values.to_vec();
-    if data.len() > n {
-        data = data.split_at(data.len() - n).1.to_vec();
-    }
-    if data.is_empty() {
+    if values.is_empty() {
         return (
             vec![Span::styled(
                 " ".repeat(width_cells),
@@ -126,28 +133,54 @@ pub fn sparkline(values: &[f64], width_cells: usize, color: Color) -> (Vec<Span<
             0.0,
         );
     }
-    let mut mx = data.iter().fold(0.0f64, |a, b| a.max(*b));
+    let (lv, mx) = sample_levels(values, width_cells, None);
+    let out = braille_cells(&lv, width_cells);
+    (vec![Span::styled(out, Style::default().fg(color))], mx)
+}
+
+/// Sparkline glyphs scaled against an ABSOLUTE 0..100 ceiling instead of
+/// the series max, so each dot sits at its true height inside a level bar.
+/// Returns plain cells (no styling) — the caller layers them over its own
+/// fg/bg. Empty string below 2 samples: no honest trend to draw yet.
+pub fn spark_cells_abs(values: &[f64], width_cells: usize) -> String {
+    if width_cells == 0 || values.len() < 2 {
+        return String::new();
+    }
+    let (lv, _) = sample_levels(values, width_cells, Some(100.0));
+    braille_cells(&lv, width_cells)
+}
+
+/// Trim to the last 2 samples per cell and bucket into levels 0..3.
+/// `fixed_max` overrides the series max (absolute scale instead of relative).
+fn sample_levels(values: &[f64], width_cells: usize, fixed_max: Option<f64>) -> (Vec<u8>, f64) {
+    let n = width_cells * 2;
+    let mut data: Vec<f64> = values.to_vec();
+    if data.len() > n {
+        data = data.split_at(data.len() - n).1.to_vec();
+    }
+    let mut mx = fixed_max.unwrap_or_else(|| data.iter().fold(0.0f64, |a, b| a.max(*b)));
     if mx <= 0.0 {
         mx = 1.0;
     }
-    // level 0..3 per sample
     let lv: Vec<u8> = data
         .iter()
         .map(|v| ((v.clamp(0.0, mx) / mx) * 3.999).floor() as u8)
         .collect();
-    // braille dots, bottom-up: left col dots 1,2,4,7 (rows 0..3), right col 4,5,6? —
-    // standard: U+2800 bit0=dot1 (top-left), bit1=dot2 (2nd row left), bit2=dot3 top-right?
-    // Layout (rows top→bottom 0..3):
-    //   dot1 = row0 left, dot2 = row1 left, dot3 = row2 left, dot7 = row3 left
-    //   dot4 = row0 right, dot5 = row1 right, dot6 = row2 right, dot8 = row3 right
-    // value 0 → baseline (bottom row, level0), value 3 → top row.
+    (lv, mx)
+}
+
+/// braille dots, bottom-up. Layout (rows top->bottom 0..3):
+///   dot1 = row0 left, dot2 = row1 left, dot3 = row2 left, dot7 = row3 left
+///   dot4 = row0 right, dot5 = row1 right, dot6 = row2 right, dot8 = row3 right
+/// level 0 -> baseline (bottom row), level 3 -> top row. Pads to width_cells.
+fn braille_cells(lv: &[u8], width_cells: usize) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < lv.len() {
         let l = lv[i];
         let r = lv.get(i + 1).copied().unwrap_or(0);
         let mut bits = 0u16;
-        // left dot at row (3 - l)  (l=0 → bottom row 3 → dot7 = bit6)
+        // left dot at row (3 - l)  (l=0 -> bottom row 3 -> dot7 = bit6)
         let lrow = 3 - l;
         bits |= match lrow {
             0 => 1 << 0, // dot1
@@ -168,7 +201,7 @@ pub fn sparkline(values: &[f64], width_cells: usize, color: Color) -> (Vec<Span<
     while out.chars().count() < width_cells {
         out.push(' ');
     }
-    (vec![Span::styled(out, Style::default().fg(color))], mx)
+    out
 }
 
 pub struct Slice {
@@ -273,4 +306,29 @@ pub fn pie(slices: &[Slice], rows: usize) -> Vec<Line<'static>> {
     }
     let _ = PI;
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spark_cells_abs_needs_two_samples_and_pads_to_width() {
+        assert_eq!(spark_cells_abs(&[], 10).chars().count(), 0);
+        assert_eq!(spark_cells_abs(&[42.0], 10).chars().count(), 0);
+        let s = spark_cells_abs(&[10.0, 90.0], 6);
+        assert_eq!(s.chars().count(), 6);
+        // absolute scale: 0% sample sits on the baseline, 100% at the top —
+        // unlike the relative sparkline which stretches whatever it gets
+        let flat = spark_cells_abs(&[0.0, 0.0, 0.0, 0.0], 4);
+        let full = spark_cells_abs(&[100.0, 100.0, 100.0, 100.0], 4);
+        assert_ne!(flat, full);
+    }
+
+    #[test]
+    fn sparkline_relative_still_reports_max() {
+        let (sp, mx) = sparkline(&[10.0, 20.0, 30.0], 4, Color::Green);
+        assert_eq!(sp.len(), 1);
+        assert!((mx - 30.0).abs() < 1e-9);
+    }
 }
