@@ -16,7 +16,7 @@ Most fleet monitors want you to install a collector on every box, run a server, 
 
 - **Zero install on targets** — the probe is embedded in the binary and shipped over SSH; the target only needs `bash` + coreutils (no jq, no python, no root except for ZFS pool stats).
 - **True rates, honestly computed** — CPU %, disk R/W, and net ↓↑ are derived by diffing cumulative counters between consecutive frames, so nothing is sampled-and-hoped.
-- **GPU visibility that actually helps** — utilization, VRAM (proportional bar + live trend sparkline), temp/power/fan, and every compute process with its **full command line** (read from `/proc/<pid>/cmdline`, not nvidia-smi's truncated name) and per-process VRAM. Driver-less hosts (e.g. Proxmox with cards passed through to VMs) still list GPUs via PCI sysfs presence.
+- **GPU visibility that actually helps** — three symmetric bars per card, stacked one on top of the other: compute %, VRAM, and power (watts as % of cap) — each with its own live trend sparkline on the same 0–100 scale, plus temp/fan, and every compute process with its **full command line** (read from `/proc/<pid>/cmdline`, not nvidia-smi's truncated name) and per-process VRAM. Driver-less hosts (e.g. Proxmox with cards passed through to VMs) still list GPUs via PCI sysfs presence.
 - **ZFS truth, not `df` lies** — pool rows use real device usage (`zpool list -p`), and each dataset with its own limit (quota / refquota / volsize — what Proxmox actually enforces on subvols and VM disks) gets its own row against that limit.
 - **Per-core load with topology** — one block per logical CPU, hyperthread siblings glued together, physical cores spaced, frequency range on the right.
 - **Nothing silently truncated** — cards scroll (keys or mouse wheel); a GPU process with a 300-character command line is wrapped and shown in full. The title bar tells you exactly which lines you're looking at (`↕7-42/58`).
@@ -82,7 +82,7 @@ Probes each target once, prints a one-line summary per host, exits 1 if any fail
 
 ## What's collected per frame
 
-Load average, overall + per-core CPU % and MHz, CPU/NVME temperatures and sensors, RAM (used / cache / free, swap, live trend sparkline), per-mount disk usage with read/write throughput, NIC rx/tx with sparkline and link speed, and GPUs: utilization, VRAM, temp, power/cap, fan, plus compute processes with full argv and per-process VRAM.
+Load average, overall + per-core CPU % and MHz, CPU/NVME temperatures and sensors, RAM (used / cache / free, swap, live trend sparkline), per-mount disk usage with read/write throughput, NIC rx/tx with sparkline and link speed, and GPUs: symmetric compute/VRAM/power bars each with its own trend sparkline, temp, fan, plus compute processes with full argv and per-process VRAM.
 
 On ZFS hosts the disk section switches to pool + dataset truth (see Features). On Proxmox, VM disks (zvols) and LXC roots (subvols) are shown against the quotas Proxmox actually enforces — not the pool-wide mount numbers `df` reports for every dataset identically.
 

@@ -490,7 +490,8 @@ fn apply_probe(h: &mut Host, probe: Probe) {
                 0.0
             };
             h.push_hist(m.cpu_pct, rx, mem_pct);
-            // vram-used % per card, so each VRAM bar gets its own trend
+            // per-card histories so every GPU bar (vram / compute / power)
+            // gets its own trend on the same scale
             for g in &m.gpus {
                 let gp = if g.mem_total_mb > 0 {
                     g.mem_used_mb as f64 / g.mem_total_mb as f64 * 100.0
@@ -498,6 +499,14 @@ fn apply_probe(h: &mut Host, probe: Probe) {
                     0.0
                 };
                 h.push_hist_gpu_vram(g.idx, gp);
+                h.push_hist_gpu_util(g.idx, g.util.clamp(0.0, 100.0));
+                // power as % of the card's cap; unscaled watts would make the
+                // trend non-comparable between cards
+                let pp = match (g.power_w, g.power_cap_w) {
+                    (Some(p), Some(c)) if c > 0.0 => (p / c * 100.0).clamp(0.0, 100.0),
+                    _ => 0.0,
+                };
+                h.push_hist_gpu_pow(g.idx, pp);
             }
             h.metrics = Some(m);
         }

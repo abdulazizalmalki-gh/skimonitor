@@ -505,6 +505,9 @@ pub struct Host {
     pub hist_mem: VecDeque<f64>,
     /// rolling vram-used % per GPU idx (trend drawn next to each VRAM bar)
     pub hist_gpu_vram: Vec<(u64, VecDeque<f64>)>,
+    /// rolling compute-util % and power % of cap per GPU idx (same grid as vram)
+    pub hist_gpu_util: Vec<(u64, VecDeque<f64>)>,
+    pub hist_gpu_pow: Vec<(u64, VecDeque<f64>)>,
     pub last_at: Option<Instant>,
     pub consecutive_errors: u32,
     pub probing: bool,
@@ -527,6 +530,8 @@ impl Host {
             hist_rx: VecDeque::with_capacity(256),
             hist_mem: VecDeque::with_capacity(256),
             hist_gpu_vram: Vec::new(),
+            hist_gpu_util: Vec::new(),
+            hist_gpu_pow: Vec::new(),
             last_at: None,
             consecutive_errors: 0,
             probing: false,
@@ -545,7 +550,21 @@ impl Host {
     }
 
     pub fn push_hist_gpu_vram(&mut self, idx: u64, pct: f64) {
-        if let Some((_, dq)) = self.hist_gpu_vram.iter_mut().find(|(i, _)| *i == idx) {
+        Self::push_hist_gpu(&mut self.hist_gpu_vram, idx, pct);
+    }
+
+    pub fn push_hist_gpu_util(&mut self, idx: u64, pct: f64) {
+        Self::push_hist_gpu(&mut self.hist_gpu_util, idx, pct);
+    }
+
+    pub fn push_hist_gpu_pow(&mut self, idx: u64, pct: f64) {
+        Self::push_hist_gpu(&mut self.hist_gpu_pow, idx, pct);
+    }
+
+    /// append one sample to a per-GPU rolling history (vram/util/power share
+    /// the same grid: one deque per card, 250-sample window, max 8 cards)
+    fn push_hist_gpu(v: &mut Vec<(u64, VecDeque<f64>)>, idx: u64, pct: f64) {
+        if let Some((_, dq)) = v.iter_mut().find(|(i, _)| *i == idx) {
             if dq.len() >= 250 {
                 dq.pop_front();
             }
@@ -553,12 +572,12 @@ impl Host {
             return;
         }
         // one entry per GPU card; a host with >8 GPUs is not worth tracking
-        if self.hist_gpu_vram.len() >= 8 {
-            self.hist_gpu_vram.remove(0);
+        if v.len() >= 8 {
+            v.remove(0);
         }
         let mut dq = VecDeque::with_capacity(256);
         dq.push_back(pct);
-        self.hist_gpu_vram.push((idx, dq));
+        v.push((idx, dq));
     }
 }
 

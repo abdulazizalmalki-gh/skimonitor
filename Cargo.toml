@@ -1,6 +1,6 @@
 [package]
 name = "skimonitor"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Multi-host SSH monitoring TUI: CPU/mem/disk/net/GPU/per-core load/temps"
 

@@ -641,99 +641,158 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                         .chars()
                         .take(16)
                         .collect();
-                    // util bar full width, labeled
-                    let mut ul = vec![Span::styled(
-                        format!("G{} ", g.idx),
-                        Style::default().fg(C_TEXT),
-                    )];
-                    ul.push(Span::styled(
-                        format!("{:.0}% ", g.util),
-                        Style::default().fg(heat(g.util)),
-                    ));
-                    ul.extend(stacked_bar(
-                        inner_w.saturating_sub(7),
-                        &[(g.util, heat(g.util), "")],
-                        100.0,
-                    ));
-                    lines.push(Line::from(fit(ul, inner_w)));
-                    // vram segmented bar (skipped when unknown, e.g. PCI-presence-only)
-                    let vt = g.mem_total_mb.max(1) as f64;
-                    let vu = g.mem_used_mb as f64;
-                    let vf = (vt - vu).max(0.0);
-                    if g.mem_total_mb > 0 {
-                        let mut vl = vec![Span::styled(
-                            format!("{short_name} "),
+                    // Header row: identity + env readouts that have no bar
+                    // of their own (temp/fan). Wattage lives on its own bar.
+                    let mut hl = vec![
+                        Span::styled(
+                            format!("G{} ", g.idx),
+                            Style::default().fg(C_ACCENT),
+                        ),
+                        Span::styled(short_name.clone(), Style::default().fg(C_TEXT)),
+                    ];
+                    if g.mem_total_mb == 0 {
+                        // PCI-presence-only card: nothing to meter
+                        hl.push(Span::styled(
+                            " · PCI presence only, no metrics",
                             Style::default().fg(C_MUTED),
-                        )];
-                        let name_w = short_name.chars().count() + 1;
-                        let vram_txt = format!(" {:.1}/{:.1}Gi", vu / 1024.0, vt / 1024.0);
-                        // vram-used % trend right next to the bar; reserve its
-                        // cells so bar+trend still fill every cell between label
-                        // and readout (no dead space — house rule)
-                        let hv: Vec<f64> = h
-                            .hist_gpu_vram
-                            .iter()
-                            .find(|(i, _)| *i == g.idx)
-                            .map(|(_, dq)| dq.iter().cloned().collect())
-                            .unwrap_or_default();
-                        let trend_w = if hv.len() >= 2 {
-                            inner_w
-                                .saturating_sub(name_w + vram_txt.chars().count() + 10)
-                                .min(20)
-                        } else {
-                            0
-                        };
-                        // fill every cell left between name and readout — no cap:
-                        // a short fixed bar made the VRAM row look truncated on wide cards
-                        let bar_w = inner_w
-                            .saturating_sub(name_w + vram_txt.chars().count() + trend_w)
-                            .max(6);
-                        vl.extend(stacked_bar(
-                            bar_w,
-                            &[(vu, Color::Magenta, ""), (vf, Color::Rgb(60, 60, 60), "")],
-                            vt,
                         ));
-                        if trend_w > 0 {
-                            let (sp, _) =
-                                sparkline(&hv, trend_w, heat(vu / vt * 100.0));
-                            vl.extend(sp);
-                        }
-                        vl.push(Span::styled(vram_txt, Style::default().fg(C_TEXT)));
-                        lines.push(Line::from(fit(vl, inner_w)));
+                        lines.push(Line::from(fit(hl, inner_w)));
                     } else {
-                        lines.push(Line::from(fit(
-                            vec![Span::styled(
-                                format!("{short_name} · PCI presence only, no metrics"),
+                        if let Some(t) = g.temp_c {
+                            hl.push(Span::styled(
+                                format!(" · {:.0}°C", t),
+                                Style::default().fg(heat_temp(t)),
+                            ));
+                        }
+                        if let Some(f) = g.fan_pct {
+                            hl.push(Span::styled(
+                                format!(" · fan {:.0}%", f),
                                 Style::default().fg(C_MUTED),
-                            )],
+                            ));
+                        }
+                        lines.push(Line::from(fit(hl, inner_w)));
+
+                        // ---- compute / VRAM / power: three level bars on ONE
+                        // shared grid, stacked directly on top of each other.
+                        // Each row = fixed label | bar | trend | right-aligned
+                        // value, all three with the SAME widths, so every bar
+                        // starts and ends at exactly the same cells.
+                        let vt = g.mem_total_mb.max(1) as f64;
+                        let vu = g.mem_used_mb as f64;
+                        let vf = (vt - vu).max(0.0);
+                        let up = g.util.clamp(0.0, 100.0);
+                        let track = Color::Rgb(60, 60, 60);
+                        // power as % of the card's cap: the only scale that is
+                        // comparable between cards of different TDPs
+                        let pwr = match (g.power_w, g.power_cap_w) {
+                            (Some(p), Some(c)) if c > 0.0 => {
+                                Some((p, c, (p / c * 100.0).clamp(0.0, 100.0)))
+                            }
+                            _ => None,
+                        };
+                        let val_cmp = format!("{:.0}%", up);
+                        let val_mem = format!("{:.1}/{:.1}Gi", vu / 1024.0, vt / 1024.0);
+                        let val_pwr = match g.power_w {
+                            Some(p) => match g.power_cap_w {
+                                Some(c) if c > 0.0 => format!("{:.0}/{}W", p, c as u64),
+                                _ => format!("{:.0}W", p),
+                            },
+                            None => String::new(),
+                        };
+                        let lbl_w = 4usize; // "cmp " / "mem " / "pwr "
+                        let val_w = [val_cmp.as_str(), val_mem.as_str(), val_pwr.as_str()]
+                            .iter()
+                            .map(|s| s.chars().count())
+                            .max()
+                            .unwrap_or(6)
+                            .max(6);
+                        // trend column: identical width on every row; dropped
+                        // entirely on cards too narrow for a 6-cell sparkline
+                        let mut trend_w = inner_w.saturating_sub(lbl_w + val_w + 1 + 12).min(20);
+                        if trend_w < 6 {
+                            trend_w = 0;
+                        }
+                        // always one cell of air between bar and value, even
+                        // when the trend column collapses on narrow cards
+                        let bar_w = inner_w
+                            .saturating_sub(lbl_w + trend_w + 1 + val_w)
+                            .max(4);
+                        let hist = |pool: &Vec<(u64, std::collections::VecDeque<f64>)>| -> Vec<f64> {
+                            pool.iter()
+                                .find(|(i, _)| *i == g.idx)
+                                .map(|(_, dq)| dq.iter().cloned().collect())
+                                .unwrap_or_default()
+                        };
+                        lines.push(Line::from(fit(
+                            gpu_metric_row(
+                                "cmp",
+                                &stacked_bar(
+                                    bar_w,
+                                    &[(up, heat(up), ""), (100.0 - up, track, "")],
+                                    100.0,
+                                ),
+                                &hist(&h.hist_gpu_util),
+                                trend_w,
+                                heat(up),
+                                &val_cmp,
+                                val_w,
+                                heat(up),
+                            ),
                             inner_w,
                         )));
-                    }
-                    // env stats get their own row so wattage never truncates
-                    let mut es = vec![Span::styled("  ", Style::default())];
-                    if let Some(t) = g.temp_c {
-                        es.push(Span::styled(
-                            format!("{:.0}°C · ", t),
-                            Style::default().fg(heat_temp(t)),
-                        ));
-                    }
-                    if let Some(pw) = g.power_w {
-                        es.push(Span::styled(
-                            match g.power_cap_w {
-                                Some(c) if c > 0.0 => format!("{:.0}/{}W", pw, c as u64),
-                                _ => format!("{:.0}W", pw),
-                            },
-                            Style::default().fg(C_TEXT),
-                        ));
-                    }
-                    if let Some(f) = g.fan_pct {
-                        es.push(Span::styled(
-                            format!(" · fan {:.0}%", f),
-                            Style::default().fg(C_MUTED),
-                        ));
-                    }
-                    if es.len() > 1 {
-                        lines.push(Line::from(fit(es, inner_w)));
+                        lines.push(Line::from(fit(
+                            gpu_metric_row(
+                                "mem",
+                                &stacked_bar(
+                                    bar_w,
+                                    &[(vu, Color::Magenta, ""), (vf, track, "")],
+                                    vt,
+                                ),
+                                &hist(&h.hist_gpu_vram),
+                                trend_w,
+                                heat(vu / vt * 100.0),
+                                &val_mem,
+                                val_w,
+                                C_TEXT,
+                            ),
+                            inner_w,
+                        )));
+                        // power row collapses when the vendor reports no watts
+                        // (e.g. AMD sysfs) — absent metric, absent row
+                        if g.power_w.is_some() {
+                            let (p_bar, p_pct) = match &pwr {
+                                Some((p, c, pct)) => (
+                                    stacked_bar(
+                                        bar_w,
+                                        &[
+                                            (p.min(*c), heat(*pct), ""),
+                                            ((c - p.min(*c)).max(0.0), track, ""),
+                                        ],
+                                        *c,
+                                    ),
+                                    *pct,
+                                ),
+                                // watts but no cap: no honest fraction to draw,
+                                // so keep the row symmetric with an empty track
+                                None => (
+                                    stacked_bar(bar_w, &[(0.0, track, "")], 1.0),
+                                    0.0,
+                                ),
+                            };
+                            lines.push(Line::from(fit(
+                                gpu_metric_row(
+                                    "pwr",
+                                    &p_bar,
+                                    &hist(&h.hist_gpu_pow),
+                                    trend_w,
+                                    heat(p_pct),
+                                    &val_pwr,
+                                    val_w,
+                                    C_TEXT,
+                                ),
+                                inner_w,
+                            )));
+                        }
                     }
                     // compute processes: full cmd, wrapped to width
                     if g.procs.is_empty() {
@@ -852,6 +911,45 @@ fn stacked_bar(w: usize, parts: &[(f64, Color, &str)], total: f64) -> Vec<Span<'
     spans
 }
 
+/// One GPU metric row on the shared bar grid: 4-cell label, the level bar,
+/// a trend sparkline (only when >=2 samples exist), then the value padded to
+/// the common value width. All three GPU bars use this so they line up.
+fn gpu_metric_row(
+    label: &str,
+    bar: &[Span<'static>],
+    hist: &[f64],
+    trend_w: usize,
+    trend_col: Color,
+    value: &str,
+    val_w: usize,
+    val_col: Color,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
+        format!("{:<4}", label),
+        Style::default().fg(C_MUTED),
+    )];
+    spans.extend(bar.iter().cloned());
+    if trend_w > 0 {
+        if hist.len() >= 2 {
+            let (sp, _) = sparkline(hist, trend_w, trend_col);
+            spans.extend(sp);
+        } else {
+            spans.push(Span::styled(
+                " ".repeat(trend_w),
+                Style::default().fg(C_MUTED),
+            ));
+        }
+    }
+    // one cell of air before the value, always — even when the trend column
+    // collapsed, so the readout never glues itself to the bar
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!("{:>val_w$}", value),
+        Style::default().fg(val_col),
+    ));
+    spans
+}
+
 fn seg_label(col: Color, name: &str, value: String) -> Span<'static> {
     Span::styled(format!("■ {name} {value}   "), Style::default().fg(col))
 }
@@ -957,7 +1055,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Style::default().fg(C_TEXT),
         )),
         Line::from(Span::styled(
-            " gpu bar:  purple = vram in use · dots = vram % trend.",
+            " gpu bars:   cmp=compute · mem=vram (purple) · pwr=watts of cap.",
             Style::default().fg(C_TEXT),
         )),
         Line::from(Span::styled(
