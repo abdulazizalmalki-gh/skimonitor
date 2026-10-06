@@ -503,6 +503,8 @@ pub struct Host {
     pub hist_cpu: VecDeque<f64>,
     pub hist_rx: VecDeque<f64>,
     pub hist_mem: VecDeque<f64>,
+    /// rolling vram-used % per GPU idx (trend drawn next to each VRAM bar)
+    pub hist_gpu_vram: Vec<(u64, VecDeque<f64>)>,
     pub last_at: Option<Instant>,
     pub consecutive_errors: u32,
     pub probing: bool,
@@ -524,6 +526,7 @@ impl Host {
             hist_cpu: VecDeque::with_capacity(256),
             hist_rx: VecDeque::with_capacity(256),
             hist_mem: VecDeque::with_capacity(256),
+            hist_gpu_vram: Vec::new(),
             last_at: None,
             consecutive_errors: 0,
             probing: false,
@@ -539,6 +542,23 @@ impl Host {
         self.hist_cpu.push_back(cpu);
         self.hist_rx.push_back(rx_bps);
         self.hist_mem.push_back(mem_pct);
+    }
+
+    pub fn push_hist_gpu_vram(&mut self, idx: u64, pct: f64) {
+        if let Some((_, dq)) = self.hist_gpu_vram.iter_mut().find(|(i, _)| *i == idx) {
+            if dq.len() >= 250 {
+                dq.pop_front();
+            }
+            dq.push_back(pct);
+            return;
+        }
+        // one entry per GPU card; a host with >8 GPUs is not worth tracking
+        if self.hist_gpu_vram.len() >= 8 {
+            self.hist_gpu_vram.remove(0);
+        }
+        let mut dq = VecDeque::with_capacity(256);
+        dq.push_back(pct);
+        self.hist_gpu_vram.push((idx, dq));
     }
 }
 

@@ -667,16 +667,37 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                         )];
                         let name_w = short_name.chars().count() + 1;
                         let vram_txt = format!(" {:.1}/{:.1}Gi", vu / 1024.0, vt / 1024.0);
+                        // vram-used % trend right next to the bar; reserve its
+                        // cells so bar+trend still fill every cell between label
+                        // and readout (no dead space — house rule)
+                        let hv: Vec<f64> = h
+                            .hist_gpu_vram
+                            .iter()
+                            .find(|(i, _)| *i == g.idx)
+                            .map(|(_, dq)| dq.iter().cloned().collect())
+                            .unwrap_or_default();
+                        let trend_w = if hv.len() >= 2 {
+                            inner_w
+                                .saturating_sub(name_w + vram_txt.chars().count() + 10)
+                                .min(20)
+                        } else {
+                            0
+                        };
                         // fill every cell left between name and readout — no cap:
                         // a short fixed bar made the VRAM row look truncated on wide cards
                         let bar_w = inner_w
-                            .saturating_sub(name_w + vram_txt.chars().count())
+                            .saturating_sub(name_w + vram_txt.chars().count() + trend_w)
                             .max(6);
                         vl.extend(stacked_bar(
                             bar_w,
                             &[(vu, Color::Magenta, ""), (vf, Color::Rgb(60, 60, 60), "")],
                             vt,
                         ));
+                        if trend_w > 0 {
+                            let (sp, _) =
+                                sparkline(&hv, trend_w, heat(vu / vt * 100.0));
+                            vl.extend(sp);
+                        }
                         vl.push(Span::styled(vram_txt, Style::default().fg(C_TEXT)));
                         lines.push(Line::from(fit(vl, inner_w)));
                     } else {
@@ -936,7 +957,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             Style::default().fg(C_TEXT),
         )),
         Line::from(Span::styled(
-            " gpu bar:  purple = vram in use.        widths are true fractions",
+            " gpu bar:  purple = vram in use · dots = vram % trend.",
             Style::default().fg(C_TEXT),
         )),
         Line::from(Span::styled(

@@ -490,6 +490,15 @@ fn apply_probe(h: &mut Host, probe: Probe) {
                 0.0
             };
             h.push_hist(m.cpu_pct, rx, mem_pct);
+            // vram-used % per card, so each VRAM bar gets its own trend
+            for g in &m.gpus {
+                let gp = if g.mem_total_mb > 0 {
+                    g.mem_used_mb as f64 / g.mem_total_mb as f64 * 100.0
+                } else {
+                    0.0
+                };
+                h.push_hist_gpu_vram(g.idx, gp);
+            }
             h.metrics = Some(m);
         }
     }
