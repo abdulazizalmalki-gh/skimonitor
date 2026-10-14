@@ -1,4 +1,5 @@
 mod demo;
+mod engine;
 mod model;
 mod ssh;
 mod ui;
@@ -479,10 +480,14 @@ impl App {
 }
 
 fn apply_probe(h: &mut Host, probe: Probe) {
+    // engine payloads arrive on the probe's ~6s refresh frames only; parse and
+    // cache them here, then attach by pid onto every derived frame
+    engine::update(&mut h.engines, &probe);
     if let Some(prev) = &h.probe {
         let dt = h.last_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         if dt > 0.3 {
-            let m = derive(&probe, prev, dt);
+            let mut m = derive(&probe, prev, dt);
+            engine::attach(&mut m, &h.engines);
             let rx = m.nets.iter().map(|n| n.rx_bps / 8.0).fold(0.0f64, f64::max);
             let mem_pct = if m.mem_total > 0 {
                 m.mem_used as f64 / m.mem_total as f64 * 100.0

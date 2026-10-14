@@ -231,8 +231,207 @@ for d in /sys/class/hwmon/hwmon*; do
 done
 [ "$NT" = null ] && { NT='null'; }
 
+# ---------- inference engine probing ----------
+# A GPU compute process is usually an inference server (llama.cpp, vLLM, SGLang,
+# TGI, Strata). For every compute pid: find the port(s) it listens on, probe
+# /metrics + /health + /v1/models on 127.0.0.1, classify the engine from the
+# payload shape, and cache a compact entry. The stream shell keeps vars between
+# the wrapper's 1s re-invocations, so a full cycle runs every ENG_EVERY seconds
+# (6s hard budget -> never stalls a frame into the watchdog window). The client
+# parses each entry and renders an inference line under the matching GPU procs.
+# curl + coreutils only; no temp files, nothing written to disk, read-only GETs.
+command -v curl >/dev/null 2>&1 || ENG_OK=0
+
+eng_curl() { # $1 = port, $2 = path, $3 = max-time -> body (empty on fail/HTML)
+  local b
+  b=$(timeout 4 curl -s -m "$3" "http://127.0.0.1:$1$2" 2>/dev/null) || return 0
+  case "$b" in *'<'*|'') return 0 ;; esac
+  printf '%s' "$b"
+}
+pid_socket_inodes() { # $1 = pid -> inodes of its socket fds (empty when the
+  # dir belongs to another user — the signal to use the fallback path)
+  ls -l "/proc/$1/fd" 2>/dev/null \
+    | sed -n 's/.* -> socket:\[\([0-9]*\)\]$/\1/p' | sort -u
+}
+listen_ino_port() { # -> "<ino> <port>" per LISTEN tcp socket (ino: from ss -e
+  # is shown even for other users' pids — ownership resolves via our own fd scan)
+  timeout 4 ss -tlnHeH 2>/dev/null | awk '
+    { ino=""; loc=""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^ino:[0-9]+$/) { ino = substr($i, 5) }
+        else if (loc == "" && $i ~ /:[0-9]+$/) { n = split($i, a, ":"); loc = a[n] }
+      }
+      if (ino != "" && loc != "") print ino, loc }'
+}
+proc_ports() { # $1 = pid -> up to 4 decimal LISTEN ports owned by the pid.
+  # Echoes the sentinel X when attribution is impossible non-root (fd dir
+  # unreadable or ss lacks -e), telling the caller to use hint fallbacks.
+  local pid=$1 inodes got
+  inodes=$(pid_socket_inodes "$pid")
+  [ -n "$inodes" ] || { printf 'X'; return 0; }
+  [ -n "${ENG_HAS_E:-}" ] || { printf 'X'; return 0; }
+  got=$(listen_ino_port | awk 'NR==FNR{want[$0]=1;next}
+      ($1 in want) && $2+0>0 && $2+0<65536 {print $2}' \
+      <(printf '%s\n' "$inodes") - | sort -un | head -4)
+  printf '%s' "$got"
+}
+cmdline_ports() { # $1 = pid -> ports from --port-style flags in the argv
+  tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | awk '
+    p ~ /(--api-port|--port|--http-port|--grpc-port)$/ && $0 ~ /^[0-9]+$/ { print $0 }
+    /^(--api-port|--port|-p)=[0-9]+$/ { split($0, a, "="); print a[2] }
+    { p = $0 }' | awk '$1 > 0 && $1 < 65536' | sort -un | head -4
+}
+netns_ports() { # $1 = pid -> LISTEN ports in the pid's netns (world-readable
+  # table; ownership unknown). Server-ish ports first; payload classification
+  # is the final gate either way.
+  local p out=''
+  while read -r _ loc _ st _; do
+    [ "$st" = "0A" ] || continue
+    p=${loc##*:}
+    case $p in *[!0-9A-Fa-f]*) continue ;; esac
+    out+="$((16#$p)) "
+  done < <(cat "/proc/$1/net/tcp" "/proc/$1/net/tcp6" 2>/dev/null)
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | tr ' ' '\n' | grep -v '^$' | sort -un | awk '
+    { order[++n] = $1 }
+    END { for (i = 1; i <= n; i++) if (order[i] == 8000 || order[i] == 8080 || \
+          order[i] == 5000 || order[i] == 11434 || (order[i] >= 18000 && order[i] < 19000)) \
+            print order[i]
+          for (i = 1; i <= n; i++) if (!(order[i] == 8000 || order[i] == 8080 || \
+          order[i] == 5000 || order[i] == 11434 || (order[i] >= 18000 && order[i] < 19000))) \
+            print order[i] }' | head -4
+}
+eng_docker_hostports() { # $1 = internal port, $2 = 12-hex cid -> host-published port
+  # docker ps {{.Ports}} lines carry '0.0.0.0:18080->8080/tcp'; pull the HOST
+  # side of every mapping whose CONTAINER side is $1, for this pid's container.
+  local line
+  [ -n "$2" ] || return 0
+  line=$(printf '%s\n' "${ENG_DOCKER_MAP:-}" | awk -v c="$2" 'index($1, c)==1 {print substr($0, length($1)+2); exit}')
+  [ -n "$line" ] || return 0
+  printf '%s' "$line" | tr ',' '\n' | grep -oE "[0-9]+->$1(/[a-z0-9]+)?" \
+    | cut -d- -f1 | grep -E '^[0-9]+$' | sort -un | head -2
+}
+eng_docker_map() { # one CLI call, cached ~30s (containers change rarely)
+  local now; now=$(date +%s 2>/dev/null || echo 0)
+  if [ -z "${ENG_DOCKER_TS:-}" ] || [ $((now - ENG_DOCKER_TS)) -ge 30 ] || [ "${1:-}" = force ]; then
+    if command -v docker >/dev/null 2>&1; then
+      ENG_DOCKER_MAP=$(timeout 2 docker ps --format '{{.ID}} {{.Ports}}' 2>/dev/null || true)
+    else
+      ENG_DOCKER_MAP=''
+    fi
+    ENG_DOCKER_TS=$now
+  fi
+}
+looks_like_server() { # $1 = pid -> 0 when argv/binary names an inference server
+  local a
+  a=$(tr ' ' ' ' < "/proc/$1/cmdline" 2>/dev/null | head -c 400)
+  case $a in
+    *llama-server*|*vllm*|*sglang*|*text-generation*|*tgi*|*strata*|*ollama*|\
+    *api_server*|*--serve*|*--port*|*--model*) return 0 ;;
+  esac
+  return 1
+}
+eng_classify() { # $1 = payload -> engine id ('' = not an engine). ORDER
+  # matters: llamacpp: prom must win before any generic prom catch-all.
+  case $1 in
+    *llamacpp:*)       echo llama-cpp ;;
+    *'"live"'*)        echo strata ;;
+    *'"prompt_ms"'*)   echo llama-legacy ;;
+    *vllm:*)           echo vllm ;;
+    *sglang:*)         echo sglang ;;
+    *tgi_*)            echo tgi ;;
+    *process_cpu*)     echo prom ;;
+    *)                 echo '' ;;
+  esac
+}
+eng_trim_prom() { # stdin = metrics text, $1 = kind -> only families we parse
+  case $1 in
+    llama-cpp) grep -E '^llamacpp:' | head -80 ;;
+    vllm) grep -E '^vllm:(gpu_cache_usage_perc|kv_cache_usage_perc|num_requests_(running|waiting|total)|prompt_tokens_total|generation_tokens_total|request_success_total|time_to_first_token_seconds_(sum|count)|request_time_per_output_token_seconds_(sum|count)|inter_token_latency_seconds_(sum|count)|gpu_prefix_cache_hit_rate)' | head -80 ;;
+    sglang) grep -E '^sglang:(num_running_reqs|num_queue_reqs|num_requests_total|token_usage|gen_throughput|prompt_tokens_total|generation_tokens_total|time_to_first_token_seconds_(sum|count)|cache_hit_rate)' | head -80 ;;
+    tgi) grep -E '^tgi_' | head -80 ;;
+    *) head -60 ;;
+  esac
+}
+eng_probe_port() { # $1 = port, $2 = pid, $3 = attr -> engine JSON object or nothing
+  local p=$1 pid=$2 attr=$3 hp hm raw kind off
+  raw=$(timeout 3 curl -s -m 1.5 "http://127.0.0.1:$p/metrics" 2>/dev/null | head -c 80000)
+  kind=''
+  off=0
+  case "$raw" in
+    *does*not*support*metrics*) kind=llama-cpp; off=1; raw='' ;;
+    *) kind=$(eng_classify "$raw") ;;
+  esac
+  hp=$(eng_curl "$p" /health 1.0)
+  if [ -z "$kind" ]; then
+    # /metrics did not classify: only an engine if /health itself speaks an
+    # engine shape — otherwise this port is some unrelated service
+    [ -n "$hp" ] || return 0
+    kind=$(eng_classify "$hp")
+    [ -n "$kind" ] || return 0
+    raw=''
+  fi
+  hm=$(eng_curl "$p" /v1/models 1.0); [ ${#hm} -gt 300 ] && hm=$(printf '%s' "$hm" | head -c 300)
+  case $kind in
+    strata|llama-legacy) ;;                     # full JSON, parsed client-side
+    prom)   raw=$(printf '%s\n' "$raw" | eng_trim_prom prom) ;;
+    *)      raw=$(printf '%s\n' "$raw" | eng_trim_prom "$kind") ;;
+  esac
+  local moff=false; [ "$off" = 1 ] && moff=true
+  printf '{"kind":"%s","port":%s,"pid":%s,"attr":"%s","t":%s,"moff":%s,"health":"%s","models":"%s","raw":"%s"}' \
+    "$kind" "$p" "$pid" "$attr" "$(date +%s 2>/dev/null || echo 0)" "$moff" \
+    "$(jstr "${hp:0:240}")" "$(jstr "${hm:-}")" "$(jstr "$raw")"
+}
+eng_probe_all() { # one cycle over every GPU compute pid -> engines JSON array
+  local pids pid ports p e out start now taken hint
+  start=$(date +%s 2>/dev/null || echo 0)
+  out=''
+  taken=''
+  pids=$("$NSMI" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null \
+    | tr -d ' ' | grep -E '^[0-9]+$' | sort -un | head -4)
+  [ -n "$pids" ] || { printf '[]'; return; }
+  for pid in $pids; do
+    ports=$(proc_ports "$pid")
+    hint=0
+    if [ "$ports" = X ]; then
+      ports=''
+      if looks_like_server "$pid"; then
+        hint=1
+        eng_docker_map
+        cid=$(sed -n 's/.*docker[-.]\([0-9a-f]\{12,64\}\).*/\1/p' \
+              "/proc/$pid/cgroup" 2>/dev/null | head -1 | cut -c1-12)
+        for ip in $(netns_ports "$pid") $(cmdline_ports "$pid"); do
+          # container? translate internal port -> host-published port
+          hp=$(eng_docker_hostports "$ip" "${cid:-}")
+          [ -n "$hp" ] && ports="$ports $hp" || ports="$ports $ip"
+        done
+        ports=$(printf '%s\n' $ports | grep -E '^[0-9]+$' | sort -un | head -4)
+      fi
+    fi
+    [ -n "$ports" ] || continue
+    for p in $ports; do
+      case " $taken " in *" $p "*) continue ;; esac
+      now=$(date +%s 2>/dev/null || echo 0)
+      [ $((now - start)) -le 4 ] || break   # hard budget: never stall a frame into the watchdog
+      e=$(eng_probe_port "$p" "$pid" "$([ "$hint" = 1 ] && echo hint || echo fd)")
+      [ -n "$e" ] || continue
+      taken="$taken $p"
+      [ -n "$out" ] && out+=','
+      out+="$e"
+      break   # one engine endpoint per process is enough
+    done
+  done
+  printf '[%s]' "$out"
+}
+
 # ---------- GPUs ----------
 GPUS=''
+
+# does this ss build publish socket inodes with -e? checked once per stream
+if [ "${ENG_OK:-1}" = 1 ] && [ -z "${ENG_ECHECK:-}" ]; then
+  if listen_ino_port | grep -q .; then ENG_HAS_E=1; fi
+  ENG_ECHECK=1
+fi
 
 # NVIDIA: nvidia-smi may be missing from a non-login PATH
 NSMI=$(command -v nvidia-smi 2>/dev/null || true)
@@ -319,6 +518,19 @@ if [ -z "$GPUS" ]; then
   done
 fi
 
+# ---------- engine cycle (cached; ~6s cadence, 4s hard budget) ----------
+# The payload rides only on refresh frames; cache frames carry "engines":null
+# so the client keeps the last map without re-shipping ~12KB every second.
+ENG_EMIT=0
+if [ "${ENG_OK:-1}" = 1 ] && [ -n "${NSMI:-}" ]; then
+  _now=$(date +%s 2>/dev/null || echo 0)
+  if [ -z "${ENG_TS:-}" ] || [ $((_now - ${ENG_TS:-0})) -ge "${ENG_EVERY:-6}" ]; then
+    ENG_JSON=$(eng_probe_all) || ENG_JSON='[]'
+    ENG_TS=$_now
+    ENG_EMIT=1
+  fi
+fi
+
 # ---------- emit ----------
 printf '{'
 printf '"v":1,'
@@ -336,5 +548,6 @@ printf '"zpools":[%s],' "$ZPOOLS"
 printf '"zdatasets":[%s],' "$ZDATS"
 printf '"nets":[%s],' "$NETS"
 printf '"temp":{"cpu_c":%s,"cpu_src":%s,"nvme_c":%s,"sensors":%s},' "$CT" "$CS" "$NT" "$TS"
-printf '"gpus":[%s]' "$GPUS"
+printf '"gpus":[%s],' "$GPUS"
+if [ "$ENG_EMIT" = 1 ]; then printf '"engines":%s' "${ENG_JSON:-[]}"; else printf '"engines":null'; fi
 printf '}\n'

@@ -772,7 +772,8 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                             )));
                         }
                     }
-                    // compute processes: full cmd, wrapped to width
+                    // compute processes: full cmd, wrapped to width, with the
+                    // inference readout (tok/s & co) directly under each command
                     if g.procs.is_empty() {
                         lines.push(Line::from(Span::styled(
                             "  no compute procs",
@@ -788,6 +789,12 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                             let head = format!("{:>5}MB {:<10} ", pr.mem_mb, usr);
                             for (li, chunk) in ws.iter().enumerate() {
                                 emit_proc(&mut lines, &head, li == 0, chunk, inner_w, head_w);
+                            }
+                            if let Some(ei) = &pr.engine {
+                                lines.push(Line::from(fit(
+                                    engine_line(ei, head_w),
+                                    inner_w,
+                                )));
                             }
                         }
                         if g.procs.len() > cap_show {
@@ -960,6 +967,101 @@ fn emit_proc(
     };
     spans.push(Span::styled(text.to_string(), Style::default().fg(C_TEXT)));
     lines.push(Line::from(fit(spans, inner_w)));
+}
+
+/// the inference readout line under a GPU process's command: engine kind +
+/// port, model, live decode/prefill tok/s, draft accept, cache hit, KV usage,
+/// context, queue. Missing metrics are simply absent — never a fake zero.
+/// When the engine is idle, avg/last numbers replace the live ones marked ~.
+fn engine_line(e: &crate::model::EngineInfo, head_w: usize) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(" ".repeat(head_w), Style::default().fg(C_MUTED))];
+    // leading dot marks the row as derived info, not part of the command
+    spans.push(Span::styled("· ", Style::default().fg(C_MUTED)));
+    let kind_col = if e.note.is_some() { Color::Yellow } else { C_ACCENT };
+    let label = format!("{} :{}", e.kind, e.port);
+    spans.push(Span::styled(label, Style::default().fg(kind_col)));
+    if e.hint {
+        spans.push(Span::styled(" (hint)", Style::default().fg(Color::Yellow)));
+    }
+    if let Some(m) = &e.model {
+        let short = crate::engine::short_model(m);
+        spans.push(Span::styled(format!(" {short}"), Style::default().fg(C_TEXT)));
+    }
+    let mut tok = Vec::new();
+    let mut idled = false;
+    if let Some(d) = e.decode_tok_s.filter(|x| *x > 0.0) {
+        tok.push(format!("dec {:.0}t/s", d));
+    } else if let Some(d) = e.decode_avg {
+        tok.push(format!("~dec {:.0}t/s", d));
+        idled = true;
+    }
+    if let Some(p) = e.prefill_tok_s.filter(|x| *x > 0.0) {
+        tok.push(format!("pre {:.0}t/s", p));
+    } else if let Some(p) = e.prefill_avg {
+        tok.push(format!("~pre {:.0}t/s", p));
+        idled = true;
+    }
+    let tok_col = if idled { C_MUTED } else { Color::LightGreen };
+    if !tok.is_empty() {
+        spans.push(Span::styled(format!(" · {}", tok.join(" · ")), Style::default().fg(tok_col)));
+    }
+    if let Some(a) = e.draft_accept_pct {
+        spans.push(Span::styled(
+            format!(" · draft {:.0}%", a),
+            Style::default().fg(heat_bright(a)),
+        ));
+    }
+    if let Some(h) = e.hit_pct {
+        spans.push(Span::styled(
+            format!(" · hit {:.0}%", h),
+            Style::default().fg(heat_bright(h)),
+        ));
+    }
+    if let Some(k) = e.kv_pct {
+        spans.push(Span::styled(
+            format!(" · kv {:.0}%", k),
+            Style::default().fg(if k > 85.0 { Color::LightRed } else { C_TEXT }),
+        ));
+    }
+    if let Some(c) = e.ctx_tokens {
+        spans.push(Span::styled(
+            format!(" · ctx {}", fmt_tok(c)),
+            Style::default().fg(C_MUTED),
+        ));
+    }
+    let rq: Vec<String> = match (e.running, e.queued) {
+        (Some(r), Some(q)) if r + q > 0.0 => vec![format!("{r:.0}run+{q:.0}q")],
+        (Some(r), _) if r > 0.0 => vec![format!("{r:.0}run")],
+        (_, Some(q)) if q > 0.0 => vec![format!("{q:.0}q")],
+        _ => vec![],
+    };
+    if !rq.is_empty() {
+        spans.push(Span::styled(
+            format!(" · {}", rq.join("/")),
+            Style::default().fg(Color::LightYellow),
+        ));
+    }
+    if let Some(n) = &e.note {
+        spans.push(Span::styled(
+            format!(" · {n}"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if tok.is_empty() && e.note.is_none() && e.draft_accept_pct.is_none() {
+        spans.push(Span::styled(" · no live numbers", Style::default().fg(C_MUTED)));
+    }
+    spans
+}
+
+/// token count compactly: 262144 -> 262k, 1.5e6 -> 1.5M
+fn fmt_tok(x: f64) -> String {
+    if x >= 1_000_000.0 {
+        format!("{:.1}M", x / 1_000_000.0)
+    } else if x >= 1_000.0 {
+        format!("{:.0}k", x / 1_000.0)
+    } else {
+        format!("{:.0}", x)
+    }
 }
 
 /// word-wrap a full command line to `w` cells; long tokens break at '/' first,

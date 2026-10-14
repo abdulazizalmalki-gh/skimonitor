@@ -76,6 +76,22 @@ fn obj(pairs: &[(&str, String)]) -> String {
 fn s(x: &str) -> String {
     format!("\"{x}\"")
 }
+
+/// JSON-escape for payloads that embed newlines/quotes (engine metric dumps)
+fn sesc(x: &str) -> String {
+    let mut o = String::with_capacity(x.len() + 8);
+    for c in x.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            _ => o.push(c),
+        }
+    }
+    format!("\"{o}\"")
+}
 fn n(x: u64) -> String {
     x.to_string()
 }
@@ -424,6 +440,81 @@ fn frame_json(h: &DemoSpec, seed: u64, tick: u64, dt: u64) -> String {
         })
         .collect();
 
+    // ---- engines (synthetic payloads per compute pid, only when the host
+    //      declares GPU procs) — drives the inference line through the real
+    //      client-side parser so --demo shows exactly what a live box shows ----
+    let mut engines: Vec<String> = Vec::new();
+    if !h.procs.is_empty() && tick % 6 == 0 {
+        for (gi, user, cmd, mem) in h.procs {
+            let pid = 8100 + mem % 700;
+            let _ = user;
+            // pick a family by what the command mentions
+            let (kind, port, raw) = if cmd.contains("vllm") {
+                let running = frac_at(seed + gi * 3 + 91, tick, 0.30, 0.2) * 4.0;
+                let gen = integral(seed + gi * 3 + 92, tick, 0.4, 0.15, 38.0 * dt as f64);
+                let itlsum = (gen as f64) / 22.0; // ~22 tok/s decode
+                (
+                    "vllm",
+                    8000 + gi,
+                    format!(
+                        "vllm:num_requests_running {running:.0}\n\
+                         vllm:num_requests_waiting {}\n\
+                         vllm:gpu_cache_usage_perc {}\n\
+                         vllm:generation_tokens_total {gen}\n\
+                         vllm:request_time_per_output_token_seconds_sum {itlsum:.3}\n\
+                         vllm:request_time_per_output_token_seconds_count {gen}\n\
+                         vllm:gpu_prefix_cache_hit_rate {}\n",
+                        (frac_at(seed + gi * 5 + 93, tick, 0.1, 0.1) * 3.0).max(0.0),
+                        frac_at(seed + gi * 7 + 94, tick, 0.5, 0.2),
+                        frac_at(seed + gi * 11 + 95, tick, 0.6, 0.2),
+                    ),
+                )
+            } else {
+                // llama.cpp prometheus: gauges are the engine's own rolling avg
+                let dec = 40.0 + wobble(seed + gi * 13 + 96, tick) * 8.0;
+                let pre = 900.0 + wobble(seed + gi * 13 + 97, tick) * 200.0;
+                let kv = frac_at(seed + gi * 13 + 98, tick, 0.35, 0.2);
+                let procf = frac_at(seed + gi * 17 + 99, tick, 0.4, 0.4);
+                (
+                    "llama-cpp",
+                    8080 + gi,
+                    format!(
+                        "llamacpp:predicted_tokens_seconds {dec:.2}\n\
+                         llamacpp:prompt_tokens_seconds {pre:.1}\n\
+                         llamacpp:requests_processing {}\n\
+                         llamacpp:requests_deferred 0\n\
+                         llamacpp:kv_cache_usage_perc {kv:.3}\n\
+                         llamacpp:n_tokens_max {}\n\
+                         llamacpp:tokens_predicted_total {}\n\
+                         llamacpp:tokens_predicted_seconds_total {}\n\
+                         llamacpp:spec_decode_num_draft_tokens_total {}\n\
+                         llamacpp:spec_decode_num_accepted_tokens_total {}\n",
+                        (procf * 3.0).round().max(0.0),
+                        8192 + (gi * 8192) as u64,
+                        integral(seed + gi * 19 + 90, tick, 0.5, 0.1, dec * dt as f64),
+                        integral(seed + gi * 19 + 91, tick, 0.5, 0.1, dt as f64),
+                        integral(seed + gi * 19 + 92, tick, 0.6, 0.1, 24.0 * dt as f64),
+                        integral(seed + gi * 19 + 93, tick, 0.6, 0.1, 15.0 * dt as f64),
+                    ),
+                )
+            };
+            let models = format!(r#"{{"data":[{{"id":"demo-lab/model-{gi}"}}]}}"#);
+            engines.push(format!(
+                "{{\"kind\":\"{kind}\",\"port\":{port},\"pid\":{pid},\"attr\":\"fd\",\"t\":{tick},\
+                 \"moff\":false,\"health\":\"ok\",\"models\":{},\"raw\":{}}}",
+                sesc(&models),
+                sesc(&raw),
+            ));
+        }
+    }
+    let engines_json = if h.procs.is_empty() {
+        "null".to_string()
+    } else if tick % 6 == 0 {
+        format!("[{}]", engines.join(","))
+    } else {
+        "null".to_string() // cached frame, exactly like the real probe
+    };
+
     obj(&[
         ("v", n(1)),
         ("epoch", n(tick)),
@@ -439,5 +530,6 @@ fn frame_json(h: &DemoSpec, seed: u64, tick: u64, dt: u64) -> String {
         ("nets", format!("[{}]", nets.join(","))),
         ("temp", temp),
         ("gpus", format!("[{}]", gpus.join(","))),
+        ("engines", engines_json),
     ])
 }

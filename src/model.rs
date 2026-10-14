@@ -30,6 +30,9 @@ pub struct Probe {
     pub temp: Temp,
     #[serde(default)]
     pub gpus: Vec<Gpu>,
+    /// engine endpoints from the probe's ~6s cycle; null on cached frames
+    #[serde(default)]
+    pub engines: Option<Vec<EngineEntry>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,6 +210,73 @@ pub struct GpuProc {
     pub mem_mb: u64,
 }
 
+/// one engine endpoint captured by the probe (already classified target-side)
+#[derive(Debug, Clone, Deserialize)]
+pub struct EngineEntry {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub port: u64,
+    #[serde(default)]
+    pub pid: u64,
+    /// "fd" = port ownership matched via socket inodes; "hint" = inferred from
+    /// argv/netns because the pid's fd dir was not readable (label honestly)
+    #[serde(default)]
+    pub attr: String,
+    /// probe-side epoch of this entry
+    #[serde(default)]
+    pub t: u64,
+    /// 1 = server refuses /metrics (llama.cpp started without --metrics)
+    #[serde(default)]
+    pub moff: crate::engine::Boolish,
+    #[serde(default)]
+    pub health: String,
+    #[serde(default)]
+    pub models: String,
+    #[serde(default)]
+    pub raw: String,
+}
+
+/// inference metrics derived from one engine entry (all optional — an engine
+/// legitimately hides whatever it does not measure)
+#[derive(Debug, Clone, Default)]
+pub struct EngineInfo {
+    pub kind: String,
+    pub port: u64,
+    pub hint: bool,
+    pub model: Option<String>,
+    /// live decode throughput, tok/s (engine's own gauge or counter diff)
+    pub decode_tok_s: Option<f64>,
+    /// live prefill throughput, tok/s
+    pub prefill_tok_s: Option<f64>,
+    /// speculative-decoding draft acceptance, % of draft tokens accepted
+    pub draft_accept_pct: Option<f64>,
+    /// prompt/cache hit rate, %
+    pub hit_pct: Option<f64>,
+    /// KV-cache usage, % of pool
+    pub kv_pct: Option<f64>,
+    /// running / queued request counts
+    pub running: Option<f64>,
+    pub queued: Option<f64>,
+    /// max context length in tokens, when the engine exposes it
+    pub ctx_tokens: Option<f64>,
+    /// idle fallback: last-request / lifetime-average decode number
+    pub decode_avg: Option<f64>,
+    pub prefill_avg: Option<f64>,
+    /// honest note: "no --metrics", "hint port", parse failures
+    pub note: Option<String>,
+}
+
+/// GPU process with its (optional) inference line attached
+#[derive(Debug, Clone)]
+pub struct ProcStat {
+    pub pid: u64,
+    pub name: String,
+    pub user: String,
+    pub mem_mb: u64,
+    pub engine: Option<EngineInfo>,
+}
+
 /// derived metrics: percent values + byte rates from a probe diff
 #[derive(Debug, Clone, Default)]
 pub struct Metrics {
@@ -295,7 +365,7 @@ pub struct GpuStat {
     pub fan_pct: Option<f64>,
     pub power_w: Option<f64>,
     pub power_cap_w: Option<f64>,
-    pub procs: Vec<GpuProc>,
+    pub procs: Vec<ProcStat>,
 }
 
 pub fn derive(cur: &Probe, prev: &Probe, dt: f64) -> Metrics {
@@ -472,7 +542,17 @@ pub fn derive(cur: &Probe, prev: &Probe, dt: f64) -> Metrics {
             fan_pct: g.fan_pct,
             power_w: g.power_w,
             power_cap_w: g.power_cap_w,
-            procs: g.processes.clone(),
+            procs: g
+                .processes
+                .iter()
+                .map(|p| ProcStat {
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    user: p.user.clone(),
+                    mem_mb: p.mem_mb,
+                    engine: None, // attached by crate::engine::update after derive
+                })
+                .collect(),
         })
         .collect();
 
@@ -511,6 +591,9 @@ pub struct Host {
     pub last_at: Option<Instant>,
     pub consecutive_errors: u32,
     pub probing: bool,
+    /// last parsed engine info per pid (probe ships payloads only on ~6s
+    /// refresh frames; cached frames re-attach from here)
+    pub engines: Vec<crate::engine::AttachedEngine>,
 }
 
 impl Host {
@@ -535,6 +618,7 @@ impl Host {
             last_at: None,
             consecutive_errors: 0,
             probing: false,
+            engines: Vec::new(),
         }
     }
 
