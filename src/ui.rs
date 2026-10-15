@@ -773,7 +773,8 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                         }
                     }
                     // compute processes: full cmd, wrapped to width, with the
-                    // inference readout (tok/s & co) directly under each command
+                    // inference readout (tok/s & co) after the bars and before
+                    // each command, itself wrapped to the card width
                     if g.procs.is_empty() {
                         lines.push(Line::from(Span::styled(
                             "  no compute procs",
@@ -784,17 +785,16 @@ fn draw_host_card(f: &mut Frame, area: Rect, h: &Host, active: bool, scroll: usi
                         let cmd_w = inner_w.saturating_sub(head_w).max(8);
                         let cap_show = 16usize;
                         for pr in g.procs.iter().take(cap_show) {
+                            if let Some(ei) = &pr.engine {
+                                for l in engine_lines(ei, head_w, inner_w) {
+                                    lines.push(l);
+                                }
+                            }
                             let ws = wrap_cmd(&pr.name, cmd_w);
                             let usr: String = pr.user.chars().take(10).collect();
                             let head = format!("{:>5}MB {:<10} ", pr.mem_mb, usr);
                             for (li, chunk) in ws.iter().enumerate() {
                                 emit_proc(&mut lines, &head, li == 0, chunk, inner_w, head_w);
-                            }
-                            if let Some(ei) = &pr.engine {
-                                lines.push(Line::from(fit(
-                                    engine_line(ei, head_w),
-                                    inner_w,
-                                )));
                             }
                         }
                         if g.procs.len() > cap_show {
@@ -969,25 +969,33 @@ fn emit_proc(
     lines.push(Line::from(fit(spans, inner_w)));
 }
 
-/// the inference readout line under a GPU process's command: engine kind +
-/// port, model, live decode/prefill tok/s, draft accept, cache hit, KV usage,
+/// the inference readout under a GPU process's command: engine kind + port,
+/// model, live decode/prefill tok/s, draft accept, cache hit, KV usage,
 /// context, queue. Missing metrics are simply absent — never a fake zero.
 /// When the engine is idle, avg/last numbers replace the live ones marked ~.
-fn engine_line(e: &crate::model::EngineInfo, head_w: usize) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled(" ".repeat(head_w), Style::default().fg(C_MUTED))];
-    // leading dot marks the row as derived info, not part of the command
-    spans.push(Span::styled("· ", Style::default().fg(C_MUTED)));
+/// Wraps at segment boundaries to the card width (never silently truncates):
+/// the first line carries the "· " marker, continuation lines align under it.
+fn engine_lines(
+    e: &crate::model::EngineInfo,
+    head_w: usize,
+    inner_w: usize,
+) -> Vec<Line<'static>> {
+    // (separator, body, style) segments; the first segment's separator is unused
+    let mut segs: Vec<(&'static str, String, Style)> = Vec::new();
     let kind_col = if e.note.is_some() { Color::Yellow } else { C_ACCENT };
-    let label = format!("{} :{}", e.kind, e.port);
-    spans.push(Span::styled(label, Style::default().fg(kind_col)));
+    let mut label = format!("{} :{}", e.kind, e.port);
     if e.hint {
-        spans.push(Span::styled(" (hint)", Style::default().fg(Color::Yellow)));
+        label.push_str(" (hint)");
     }
+    segs.push(("", label, Style::default().fg(kind_col)));
     if let Some(m) = &e.model {
-        let short = crate::engine::short_model(m);
-        spans.push(Span::styled(format!(" {short}"), Style::default().fg(C_TEXT)));
+        segs.push((
+            " ",
+            crate::engine::short_model(m),
+            Style::default().fg(C_TEXT),
+        ));
     }
-    let mut tok = Vec::new();
+    let mut tok: Vec<String> = Vec::new();
     let mut idled = false;
     if let Some(d) = e.decode_tok_s.filter(|x| *x > 0.0) {
         tok.push(format!("dec {:.0}t/s", d));
@@ -1002,55 +1010,82 @@ fn engine_line(e: &crate::model::EngineInfo, head_w: usize) -> Vec<Span<'static>
         idled = true;
     }
     let tok_col = if idled { C_MUTED } else { Color::LightGreen };
-    if !tok.is_empty() {
-        spans.push(Span::styled(format!(" · {}", tok.join(" · ")), Style::default().fg(tok_col)));
+    for t in tok.iter() {
+        segs.push((" · ", t.clone(), Style::default().fg(tok_col)));
     }
     if let Some(a) = e.draft_accept_pct {
-        spans.push(Span::styled(
-            format!(" · draft {:.0}%", a),
+        segs.push((
+            " · ",
+            format!("draft {:.0}%", a),
             Style::default().fg(heat_bright(a)),
         ));
     }
     if let Some(h) = e.hit_pct {
-        spans.push(Span::styled(
-            format!(" · hit {:.0}%", h),
+        segs.push((
+            " · ",
+            format!("hit {:.0}%", h),
             Style::default().fg(heat_bright(h)),
         ));
     }
     if let Some(k) = e.kv_pct {
-        spans.push(Span::styled(
-            format!(" · kv {:.0}%", k),
+        segs.push((
+            " · ",
+            format!("kv {:.0}%", k),
             Style::default().fg(if k > 85.0 { Color::LightRed } else { C_TEXT }),
         ));
     }
     if let Some(c) = e.ctx_tokens {
-        spans.push(Span::styled(
-            format!(" · ctx {}", fmt_tok(c)),
+        segs.push((
+            " · ",
+            format!("ctx {}", fmt_tok(c)),
             Style::default().fg(C_MUTED),
         ));
     }
-    let rq: Vec<String> = match (e.running, e.queued) {
-        (Some(r), Some(q)) if r + q > 0.0 => vec![format!("{r:.0}run+{q:.0}q")],
-        (Some(r), _) if r > 0.0 => vec![format!("{r:.0}run")],
-        (_, Some(q)) if q > 0.0 => vec![format!("{q:.0}q")],
-        _ => vec![],
+    let rq: Option<String> = match (e.running, e.queued) {
+        (Some(r), Some(q)) if r + q > 0.0 => Some(format!("{r:.0}run+{q:.0}q")),
+        (Some(r), _) if r > 0.0 => Some(format!("{r:.0}run")),
+        (_, Some(q)) if q > 0.0 => Some(format!("{q:.0}q")),
+        _ => None,
     };
-    if !rq.is_empty() {
-        spans.push(Span::styled(
-            format!(" · {}", rq.join("/")),
-            Style::default().fg(Color::LightYellow),
-        ));
+    if let Some(s) = rq {
+        segs.push((" · ", s, Style::default().fg(Color::LightYellow)));
     }
     if let Some(n) = &e.note {
-        spans.push(Span::styled(
-            format!(" · {n}"),
-            Style::default().fg(Color::Yellow),
-        ));
+        segs.push((" · ", n.clone(), Style::default().fg(Color::Yellow)));
     }
     if tok.is_empty() && e.note.is_none() && e.draft_accept_pct.is_none() {
-        spans.push(Span::styled(" · no live numbers", Style::default().fg(C_MUTED)));
+        segs.push((
+            " · ",
+            "no live numbers".into(),
+            Style::default().fg(C_MUTED),
+        ));
     }
-    spans
+    // greedy wrap: a segment that no longer fits starts a continuation line
+    // aligned under the marker's text; the separator it would have led with
+    // is dropped. Single segments wider than the line fall through to fit().
+    let marker_w = head_w + 2; // indent + "· "
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = vec![Span::styled(
+        " ".repeat(head_w) + "· ",
+        Style::default().fg(C_MUTED),
+    )];
+    let mut cur_w = marker_w;
+    for (i, (sep, body, style)) in segs.into_iter().enumerate() {
+        let sep = if i == 0 { "" } else { sep };
+        let add = sep.chars().count() + body.chars().count();
+        if cur_w > marker_w && cur_w + add > inner_w {
+            out.push(Line::from(fit(std::mem::take(&mut cur), inner_w)));
+            cur = vec![Span::styled(" ".repeat(marker_w), Style::default())];
+            cur_w = marker_w;
+            cur_w += body.chars().count();
+            cur.push(Span::styled(body, style));
+        } else {
+            cur.push(Span::styled(format!("{sep}{body}"), style));
+            cur_w += add;
+        }
+    }
+    out.push(Line::from(fit(cur, inner_w)));
+    out
 }
 
 /// token count compactly: 262144 -> 262k, 1.5e6 -> 1.5M
