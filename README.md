@@ -1,6 +1,6 @@
 # skimonitor
 
-**One terminal. Three servers. Everything at a glance.**
+**One terminal. Up to six servers. Everything at a glance.**
 
 skimonitor is a multi-host SSH monitoring TUI written in Rust. Point it at your machines and it streams a single dense dashboard — CPU, memory, disks (including ZFS truth), network, temperatures, and GPUs with per-process VRAM — side by side, refreshed every second. No agents, no daemon, no database: just SSH keys and one static binary.
 
@@ -10,7 +10,7 @@ skimonitor is a multi-host SSH monitoring TUI written in Rust. Point it at your 
 
 ## Why
 
-Most fleet monitors want you to install a collector on every box, run a server, and open ports. skimonitor wants one thing: that you can already `ssh` to the host. It runs a small self-contained probe over a persistent SSH connection, streams one JSON frame per second back, and renders three hosts on one screen at terminal size. It is the tool you start when `htop` on five tabs and `watch -n1 df` on three terminals stop being manageable — but a full observability stack is overkill.
+Most fleet monitors want you to install a collector on every box, run a server, and open ports. skimonitor wants one thing: that you can already `ssh` to the host. It runs a small self-contained probe over a persistent SSH connection, streams one JSON frame per second back, and renders up to six hosts on one screen at terminal size. It is the tool you start when `htop` on five tabs and `watch -n1 df` on three terminals stop being manageable — but a full observability stack is overkill.
 
 ## Features
 
@@ -20,6 +20,7 @@ Most fleet monitors want you to install a collector on every box, run a server, 
 - **Inference readout per GPU process** — under each compute process's command line, a compact line found by probing the ports that process owns (fd socket inodes; container ports translated via `docker ps`; argv `--port` hints otherwise): engine kind + endpoint, model, decode and prefill tok/s (live from the engine's own rolling gauge; `~` prefixed lifetime averages when idle), draft accept %, prefix-cache hit %, KV usage, context, running/queued. llama.cpp (prometheus and legacy JSON), vLLM, SGLang, TGI, Strata and Ollama-style health shapes are recognized; a server started without `--metrics` says so instead of showing zeros. Probing is read-only GETs to localhost on a ~6s cached cycle with a hard time budget — it never slows the 1s frames.
 - **ZFS truth, not `df` lies** — pool rows use real device usage (`zpool list -p`), and each dataset with its own limit (quota / refquota / volsize — what Proxmox actually enforces on subvols and VM disks) gets its own row against that limit.
 - **Per-core load with topology** — one block per logical CPU, hyperthread siblings glued together, physical cores spaced, frequency range on the right.
+- **Six hosts on one screen** — the first three sit side by side; add a fourth and the highlighted card splits in two, the new host taking the lower half (three columns, two rows max). Every card stays visible and scrollable — nothing is squeezed out.
 - **Nothing silently truncated** — cards scroll (keys or mouse wheel); a GPU process with a 300-character command line is wrapped and shown in full. The title bar tells you exactly which lines you're looking at (`↕7-42/58`).
 - **Self-healing streams** — dead SSH connections are detected, respawned with capped exponential backoff, and a silence watchdog reconnects streams that stop answering. Auth failures as your user automatically retry as `root@host`.
 - **`--demo` mode** — three invented hosts replayed through the real code path, for screenshots, testing, and showing your team what the tool does. No SSH, no data, no risk.
@@ -42,11 +43,12 @@ cargo build --release        # -> target/release/skimonitor
 
 ```
 skimonitor web-01 db-01 cache-02        # three hosts, 1 Hz
+skimonitor web-01 db-01 cache-02 db-02  # fourth splits the highlighted card
 skimonitor local                        # watch this machine
 skimonitor -i 2 user@203.0.113.9        # 2-second frames over WAN
 ```
 
-Every argument is a target: an `~/.ssh/config` alias, a hostname, an IP, or `user@host`. `local` self-scans without SSH. Max 3 hosts side by side; press `x` to drop one, `a` to add another.
+Every argument is a target: an `~/.ssh/config` alias, a hostname, an IP, or `user@host`. `local` self-scans without SSH. Up to six hosts: the first three side by side, then the highlighted card splits and the new host stacks under it. Press `x` to drop one, `a` to add another.
 
 Want to see it before wiring it to anything?
 

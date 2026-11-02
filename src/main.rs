@@ -74,7 +74,9 @@ fn parse_args() -> Args {
                      identities and default keys. BatchMode: never prompts for passwords.\n\
                      Targets need bash + coreutils. Keys: a add · x remove · Tab/←→ switch ·\n\
                      r restart streams · p pause · +/- interval · ↑↓/PgUp/PgDn/wheel scroll\n\
-                     a card that overflows (↕ in its title) · ? help · q quit"
+                     a card that overflows (↕ in its title) · ? help · q quit\n\n\
+                     Up to 6 hosts: the first three side by side, then the highlighted\n\
+                     card splits in two and the new host takes the lower half."
                 );
                 std::process::exit(0);
             }
@@ -152,6 +154,8 @@ struct App {
     quit: bool,
     /// per-card vertical scroll offset (lines)
     scrolls: Vec<usize>,
+    /// stacked cards per column (sum == hosts.len()); a column holds 1 or 2
+    rows: Vec<usize>,
     /// per-card max scroll from last draw (line overflow)
     card_max: Vec<usize>,
     /// per-card rect from last draw (mouse wheel hit-test)
@@ -197,6 +201,7 @@ impl App {
             pidrx: HashMap::new(),
             quit: false,
             scrolls: Vec::new(),
+            rows: Vec::new(),
             card_max: Vec::new(),
             card_geoms: Vec::new(),
         };
@@ -234,13 +239,52 @@ impl App {
             return;
         }
         self.note = None;
-        self.hosts.push(Host::new(&target));
-        self.scrolls.push(0);
+        self.rows = crate::ui::layout_rows(self.hosts.len(), &self.rows);
+        // Where the new card lands: the first MAX_COLS hosts each open a new
+        // column; from the 4th on, the highlighted card's column splits in
+        // two and the new host takes the lower half (if that column is
+        // already split, the next single-card column splits instead).
+        let insert_at = if self.hosts.len() < crate::ui::MAX_COLS {
+            self.rows.push(1);
+            self.hosts.len()
+        } else {
+            let sel_col = self.col_of(self.sel);
+            let col = if self.rows.get(sel_col).copied() == Some(1) {
+                sel_col
+            } else {
+                self.rows
+                    .iter()
+                    .position(|r| *r == 1)
+                    .unwrap_or_else(|| self.rows.len().saturating_sub(1))
+            };
+            let end = self.rows[..=col]
+                .iter()
+                .sum::<usize>()
+                .min(self.hosts.len());
+            self.rows[col] += 1;
+            end
+        };
+        self.scrolls.resize(self.hosts.len(), 0);
+        self.hosts.insert(insert_at, Host::new(&target));
+        self.scrolls.insert(insert_at, 0);
         self.streams.insert(target.clone(), Stream::new());
         if !self.demo {
             self.spawn(target);
         }
-        self.sel = self.hosts.len() - 1;
+        self.sel = insert_at;
+    }
+
+    /// index of the column that holds card `idx`
+    fn col_of(&self, idx: usize) -> usize {
+        let plan = crate::ui::layout_rows(self.hosts.len(), &self.rows);
+        let mut acc = 0usize;
+        for (c, r) in plan.iter().enumerate() {
+            acc += r;
+            if idx < acc {
+                return c;
+            }
+        }
+        plan.len().saturating_sub(1)
     }
 
     /// (re)spawn the stream for a target
@@ -297,11 +341,23 @@ impl App {
         }
         self.pidrx.remove(&t);
         let idx = self.sel;
+        let col = self.col_of(idx);
+        self.rows = crate::ui::layout_rows(self.hosts.len(), &self.rows);
         self.hosts.remove(idx);
-        if idx < self.scrolls.len() {
-            self.scrolls.remove(idx);
+        self.scrolls.remove(idx);
+        // give the slot back: a split column loses a row, an unsplit column
+        // disappears and the columns to its right slide left
+        match self.rows.get_mut(col) {
+            Some(r) if *r > 1 => *r -= 1,
+            _ => {
+                if col < self.rows.len() {
+                    self.rows.remove(col);
+                }
+            }
         }
+        self.rows = crate::ui::layout_rows(self.hosts.len(), &self.rows);
         self.scrolls.truncate(self.hosts.len());
+        self.card_max.truncate(self.hosts.len());
         if self.sel >= self.hosts.len() {
             self.sel = self.hosts.len().saturating_sub(1);
         }
@@ -642,6 +698,7 @@ fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>, args: Args) -> io::Res
                 result = ui::draw(
                     f,
                     &app.hosts,
+                    &app.rows,
                     app.sel,
                     app.interval,
                     &app.input,
@@ -733,9 +790,8 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.input = Some(String::new());
             }
         }
-        KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') => {
-            let i =
-                (code == KeyCode::Char('2')) as usize + (code == KeyCode::Char('3')) as usize * 2;
+        KeyCode::Char(c @ '1'..='6') => {
+            let i = c as usize - '1' as usize;
             if i < app.hosts.len() {
                 app.sel = i;
             }
@@ -775,5 +831,99 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// demo mode: real App bookkeeping, no ssh spawned
+    fn app_with(names: &[&str]) -> App {
+        let ts: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        App::new(&ts, 1, true)
+    }
+
+    fn order(app: &App) -> Vec<String> {
+        app.hosts.iter().map(|h| h.target.clone()).collect()
+    }
+
+    #[test]
+    fn first_three_hosts_get_a_column_each() {
+        let app = app_with(&["a", "b", "c"]);
+        assert_eq!(app.rows, vec![1, 1, 1]);
+        assert_eq!(order(&app), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn fourth_host_splits_the_highlighted_column_below_it() {
+        let mut app = app_with(&["a", "b", "c"]);
+        app.sel = 1; // highlight b's column
+        app.add_target("d");
+        assert_eq!(app.rows, vec![1, 2, 1]);
+        assert_eq!(order(&app), ["a", "b", "d", "c"]);
+        assert_eq!(app.sel, 2); // focus lands on the new lower card
+        assert_eq!(app.col_of(1), 1);
+        assert_eq!(app.col_of(2), 1);
+        assert_eq!(app.col_of(3), 2);
+    }
+
+    #[test]
+    fn adding_past_three_splits_the_next_single_column() {
+        let mut app = app_with(&["a", "b", "c"]);
+        app.sel = 0;
+        app.add_target("d"); // a's column splits
+        assert_eq!(app.rows, vec![2, 1, 1]);
+        app.sel = 3; // c: its column is still single
+        app.add_target("e");
+        assert_eq!(app.rows, vec![2, 1, 2]);
+        assert_eq!(order(&app), ["a", "d", "b", "c", "e"]);
+        app.sel = 0; // a's column is already split
+        app.add_target("f");
+        assert_eq!(app.rows, vec![2, 2, 2]);
+        assert_eq!(order(&app), ["a", "d", "b", "f", "c", "e"]);
+        assert_eq!(app.sel, 3);
+    }
+
+    #[test]
+    fn seventh_host_is_refused() {
+        let mut app = app_with(&["a", "b", "c", "d", "e", "f"]);
+        app.add_target("g");
+        assert_eq!(app.hosts.len(), 6);
+        assert!(app.note.is_some());
+    }
+
+    #[test]
+    fn removing_gives_the_slot_back() {
+        let mut app = app_with(&["a", "b", "c"]);
+        app.sel = 1;
+        app.add_target("d");
+        assert_eq!(app.rows, vec![1, 2, 1]);
+        app.sel = 2; // d, lower half of b's column
+        app.remove_selected();
+        assert_eq!(order(&app), ["a", "b", "c"]);
+        assert_eq!(app.rows, vec![1, 1, 1]);
+        // dropping a whole column closes it and the rest slide left
+        let mut app = app_with(&["a", "b", "c"]);
+        app.sel = 0;
+        app.add_target("d");
+        app.sel = 0;
+        app.remove_selected(); // a
+        app.sel = 0;
+        app.remove_selected(); // d -> column 0 is gone
+        assert_eq!(order(&app), ["b", "c"]);
+        assert_eq!(app.rows, vec![1, 1]);
+    }
+
+    #[test]
+    fn every_host_has_a_slot_after_any_add_remove_sequence() {
+        let mut app = app_with(&["a", "b", "c", "d", "e", "f"]);
+        assert_eq!(app.rows.iter().sum::<usize>(), app.hosts.len());
+        app.sel = 4;
+        app.remove_selected();
+        assert_eq!(app.rows.iter().sum::<usize>(), app.hosts.len());
+        app.add_target("g");
+        assert_eq!(app.rows.iter().sum::<usize>(), app.hosts.len());
+        assert!(app.rows.iter().all(|r| (1..=crate::ui::MAX_ROWS).contains(r)));
     }
 }

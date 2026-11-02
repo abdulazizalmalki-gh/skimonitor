@@ -10,9 +10,47 @@ pub const C_ACCENT: Color = Color::Cyan;
 pub const C_MUTED: Color = Color::DarkGray;
 pub const C_TEXT: Color = Color::Gray;
 
-pub const MAX_HOSTS: usize = 3;
+pub const MAX_HOSTS: usize = 6;
+/// columns on screen; past MAX_COLS hosts, a column stacks up to MAX_ROWS cards
+pub const MAX_COLS: usize = 3;
+pub const MAX_ROWS: usize = 2;
 
 const CORE_LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Rows (stacked cards) per column for `n` hosts. Up to MAX_COLS hosts, each
+/// host owns a column; beyond that the app's split bookkeeping (`rows`) decides
+/// which column got split, and this repairs it into a shape that holds exactly
+/// `n` cards (each column 1..=MAX_ROWS, at most MAX_COLS columns).
+pub fn layout_rows(n: usize, rows: &[usize]) -> Vec<usize> {
+    if n == 0 {
+        return vec![1];
+    }
+    if n <= MAX_COLS {
+        return vec![1; n];
+    }
+    let mut out: Vec<usize> = (0..MAX_COLS)
+        .map(|i| rows.get(i).copied().unwrap_or(1).clamp(1, MAX_ROWS))
+        .collect();
+    let mut sum: usize = out.iter().sum();
+    while sum < n {
+        match out.iter_mut().find(|r| **r < MAX_ROWS) {
+            Some(r) => {
+                *r += 1;
+                sum += 1;
+            }
+            None => break,
+        }
+    }
+    let mut i = out.len();
+    while sum > n && i > 0 {
+        i -= 1;
+        while out[i] > 1 && sum > n {
+            out[i] -= 1;
+            sum -= 1;
+        }
+    }
+    out
+}
 
 /// Geometry of one host card after layout: used for mouse-scroll hit testing.
 #[derive(Clone, Copy)]
@@ -29,6 +67,7 @@ pub struct CardGeom {
 pub fn draw(
     f: &mut Frame,
     hosts: &[Host],
+    rows: &[usize],
     sel: usize,
     interval_s: u64,
     input: &Option<String>,
@@ -90,42 +129,61 @@ pub fn draw(
                 Style::default().fg(dotc)
             },
         ));
-        let lbl: String = h.label.chars().take(14).collect();
+        let lbl: String = h
+            .label
+            .chars()
+            .take(if hosts.len() > MAX_COLS { 10 } else { 14 })
+            .collect();
         head.push(Span::styled(format!("{lbl} "), st));
     }
     let hint = if hosts.len() < MAX_HOSTS {
         "  [a]add [x]drop [r]estart [p]pause [?]help [q]quit"
     } else {
-        "  [x]drop [r]estart [p]pause [?]help [q]quit (max 3 hosts)"
+        "  [x]drop [r]estart [p]pause [?]help [q]quit (max 6 hosts)"
     };
     head.push(Span::styled(hint, Style::default().fg(C_MUTED)));
     f.render_widget(Paragraph::new(Line::from(head)), chunks[0]);
 
-    // ---- host cards, side by side, always visible ----
-    let ncols = hosts.len().clamp(1, MAX_HOSTS);
-    let cols = Layout::horizontal(vec![Constraint::Fill(1); ncols]).split(chunks[1]);
-    let mut maxscrolls = vec![0usize; ncols];
-    let geoms: Vec<CardGeom> = cols
-        .iter()
-        .map(|c| CardGeom {
-            x0: c.x,
-            x1: c.x + c.width.saturating_sub(1),
-            y0: c.y,
-            y1: c.y + c.height.saturating_sub(1),
-        })
-        .collect();
+    // ---- host cards, side by side, always visible. Past MAX_COLS hosts a
+    // column holds two cards, the new one stacked under the highlighted card.
+    let plan = layout_rows(hosts.len(), rows);
+    let cols = Layout::horizontal(vec![Constraint::Fill(1); plan.len()]).split(chunks[1]);
+    let mut maxscrolls = vec![0usize; hosts.len()];
+    let mut geoms: Vec<CardGeom> = vec![
+        CardGeom {
+            x0: 0,
+            x1: 0,
+            y0: 0,
+            y1: 0,
+        };
+        hosts.len()
+    ];
     if hosts.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
-                " no hosts — press [a] to add one (max 3)",
+                format!(" no hosts — press [a] to add one (max {MAX_HOSTS})"),
                 Style::default().fg(C_MUTED),
             )),
             cols[0],
         );
     }
-    for (i, h) in hosts.iter().enumerate().take(MAX_HOSTS) {
-        let sc = scrolls.get(i).copied().unwrap_or(0);
-        maxscrolls[i] = draw_host_card(f, cols[i], h, i == sel, sc);
+    let mut i = 0usize;
+    for (c, &r) in plan.iter().enumerate() {
+        let panes = Layout::vertical(vec![Constraint::Fill(1); r]).split(cols[c]);
+        for pane in panes.iter().take(r) {
+            if i >= hosts.len() {
+                break;
+            }
+            geoms[i] = CardGeom {
+                x0: pane.x,
+                x1: pane.x + pane.width.saturating_sub(1),
+                y0: pane.y,
+                y1: pane.y + pane.height.saturating_sub(1),
+            };
+            let sc = scrolls.get(i).copied().unwrap_or(0);
+            maxscrolls[i] = draw_host_card(f, *pane, &hosts[i], i == sel, sc);
+            i += 1;
+        }
     }
 
     // ---- status / input line ----
@@ -1147,18 +1205,20 @@ fn wrap_cmd(name: &str, w: usize) -> Vec<String> {
 
 fn draw_help(f: &mut Frame, area: Rect) {
     let w = 74u16.min(area.width.saturating_sub(4));
-    let h = 20u16.min(area.height.saturating_sub(2));
+    let h = 22u16.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect::new(x, y, w, h);
     let text = vec![
         Line::from(Span::styled(
-            "skimonitor — up to 3 hosts, all live on one screen",
+            "skimonitor — up to 6 hosts, all live on one screen",
             Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(" a        add host (user@host, ssh alias, IP; space/comma)"),
-        Line::from(" ←→/Tab   cycle focus (highlight)  1/2/3  select card"),
+        Line::from("          past 3 hosts, the highlighted card splits in two and"),
+        Line::from("          the new host takes the lower half"),
+        Line::from(" ←→/Tab   cycle focus (highlight)  1..6  select card"),
         Line::from(" x/Del    drop focused card        r    restart all streams"),
         Line::from(" +/-      stream interval 1..60s   p    pause / resume"),
         Line::from(" ↑↓/PgUp/PgDn   scroll focused card (↕ lines in its title)"),
@@ -1226,4 +1286,36 @@ fn fit(spans: Vec<Span<'static>>, w: usize) -> Vec<Span<'static>> {
 
 fn short_dev(d: &str) -> String {
     d.rsplit('/').next().unwrap_or(d).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_rows_gives_each_of_the_first_hosts_a_column() {
+        assert_eq!(layout_rows(0, &[]), vec![1]);
+        assert_eq!(layout_rows(1, &[]), vec![1]);
+        assert_eq!(layout_rows(3, &[1, 1, 1]), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn layout_rows_stacks_past_three_hosts() {
+        assert_eq!(layout_rows(4, &[1, 1, 1]), vec![1, 1, 2]);
+        assert_eq!(layout_rows(5, &[2, 1, 1]), vec![2, 2, 1]);
+        assert_eq!(layout_rows(6, &[1, 1, 1]), vec![2, 2, 2]);
+    }
+
+    #[test]
+    fn layout_rows_repairs_inconsistent_bookkeeping() {
+        // stale rows that no longer add up must still place exactly n cards
+        assert_eq!(layout_rows(6, &[1]), vec![2, 2, 2]);
+        assert_eq!(layout_rows(4, &[2, 2]), vec![2, 1, 1]);
+        assert_eq!(layout_rows(5, &[0, 9, 1]), vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn max_hosts_fits_three_columns_of_two() {
+        assert_eq!(MAX_HOSTS, MAX_COLS * MAX_ROWS);
+    }
 }
