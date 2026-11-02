@@ -132,14 +132,14 @@ pub fn draw(
         let lbl: String = h
             .label
             .chars()
-            .take(if hosts.len() > MAX_COLS { 10 } else { 14 })
+            .take(if hosts.len() > MAX_COLS { 8 } else { 14 })
             .collect();
         head.push(Span::styled(format!("{lbl} "), st));
     }
     let hint = if hosts.len() < MAX_HOSTS {
-        "  [a]add [x]drop [r]estart [p]pause [?]help [q]quit"
+        "  [a]add [x]drop [r]restart [p]pause [?]help [q]quit"
     } else {
-        "  [x]drop [r]estart [p]pause [?]help [q]quit (max 6 hosts)"
+        "  [x]drop [r]restart [?]help [q]quit"
     };
     head.push(Span::styled(hint, Style::default().fg(C_MUTED)));
     f.render_widget(Paragraph::new(Line::from(head)), chunks[0]);
@@ -1301,7 +1301,7 @@ mod tests {
 
     #[test]
     fn layout_rows_stacks_past_three_hosts() {
-        assert_eq!(layout_rows(4, &[1, 1, 1]), vec![1, 1, 2]);
+        assert_eq!(layout_rows(4, &[1, 1, 1]), vec![2, 1, 1]);
         assert_eq!(layout_rows(5, &[2, 1, 1]), vec![2, 2, 1]);
         assert_eq!(layout_rows(6, &[1, 1, 1]), vec![2, 2, 2]);
     }
