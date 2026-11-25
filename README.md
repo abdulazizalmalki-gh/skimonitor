@@ -1,6 +1,6 @@
 # skimonitor
 
-**One terminal. Up to six servers. Everything at a glance.**
+**One screen. Up to six servers. Terminal or browser.**
 
 skimonitor is a multi-host SSH monitoring TUI written in Rust. Point it at your machines and it streams a single dense dashboard — CPU, memory, disks (including ZFS truth), network, temperatures, and GPUs with per-process VRAM — side by side, refreshed every second. No agents, no daemon, no database: just SSH keys and one static binary. Prefer a browser tab to a terminal? `--web` serves the exact same screen over HTTP.
 
@@ -10,7 +10,7 @@ skimonitor is a multi-host SSH monitoring TUI written in Rust. Point it at your 
 
 ## Why
 
-Most fleet monitors want you to install a collector on every box, run a server, and open ports. skimonitor wants one thing: that you can already `ssh` to the host. It runs a small self-contained probe over a persistent SSH connection, streams one JSON frame per second back, and renders up to six hosts on one screen at terminal size. It is the tool you start when `htop` on five tabs and `watch -n1 df` on three terminals stop being manageable — but a full observability stack is overkill.
+Most fleet monitors want you to install a collector on every box, run a server, and open ports. skimonitor wants one thing: that you can already `ssh` to the host. It runs a small self-contained probe over a persistent SSH connection, streams one JSON frame per second back, and renders up to six hosts on one screen at terminal size. It is the tool you start when `htop` on five tabs and `watch -n1 df` on three terminals stop being manageable — but a full observability stack is overkill. When you want that same screen on a wall display, a laptop you cannot install anything on, or a screen in another room, `--web` serves it to a browser instead.
 
 ## Features
 
@@ -28,7 +28,7 @@ Most fleet monitors want you to install a collector on every box, run a server, 
 
 ## Install
 
-Grab the latest release binary for your platform:
+Grab the latest release archive for your platform — `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`, each with a `sha256sums-*.txt` beside it:
 
 ```
 https://github.com/abdulazizalmalki-gh/skimonitor/releases
@@ -47,6 +47,7 @@ skimonitor web-01 db-01 cache-02        # three hosts, 1 Hz
 skimonitor web-01 db-01 cache-02 db-02  # fourth splits the highlighted card
 skimonitor local                        # watch this machine
 skimonitor -i 2 user@203.0.113.9        # 2-second frames over WAN
+skimonitor --web web-01 db-01           # same screen, in a browser (:8383)
 ```
 
 Every argument is a target: an `~/.ssh/config` alias, a hostname, an IP, or `user@host`. `local` self-scans without SSH. Up to six hosts: the first three side by side, then the highlighted card splits and the new host stacks under it. Press `x` to drop one, `a` to add another.
@@ -68,7 +69,7 @@ Nothing is stored by skimonitor or sent anywhere except the hosts you target. On
 | key | action |
 |-----|--------|
 | `a` / `x` | add / remove host |
-| `1..3`, `←`/`→`, `Tab` | select host |
+| `1..6`, `←`/`→`, `Tab` | select host |
 | `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` | scroll the focused card when it overflows (`↕` shown in its title) |
 | mouse wheel | scroll the card under the cursor |
 | `+` / `-` | stream interval, 1..60 s |
@@ -85,6 +86,8 @@ skimonitor --web -p 9000 --bind 127.0.0.1 db-01   # loopback only, for a reverse
 
 ![skimonitor in a browser](docs/web.png)
 
+*(Same `--demo` replay: the browser is showing the invented hosts, not a fleet.)*
+
 The page is the terminal screen, not a reinterpretation of it: skimonitor draws
 the same `ui::draw` into an off-screen ratatui buffer at the browser's grid
 size and ships those cells (glyph, foreground, background, bold) over
@@ -92,7 +95,9 @@ Server-Sent Events. The page is a monospace grid that paints them; braille
 sparklines and block glyphs are drawn as cell geometry because no common
 monospace font has them. Keys, clicks and the wheel post back to the same state
 machine the TUI uses, so scrolling, focus, add/drop and pause behave
-identically.
+identically. There is no build step and no CDN: the page, its CSS/JS and the
+font are embedded in the binary, and a tab shows a full frame as soon as it
+connects.
 
 Consequences worth knowing before exposing it: the HTTP port has **no login of its own** — anyone who can reach it sees what you would see, including process command lines. Bind it to `127.0.0.1` behind a proxy, or keep it on a network you trust. `q`/`Ctrl-C` cannot stop the server; Esc closes the help overlay.
 
@@ -131,6 +136,8 @@ On ZFS hosts the disk section switches to pool + dataset truth (see Features). O
 
 One persistent `ssh -T` per host runs the embedded probe (`probe.sh`, bash + coreutils only) in a loop; each tick prints exactly one JSON object. The Rust side parses frames, diffs consecutive counters into rates, and renders with ratatui. There is no state between frames beyond rolling sparkline history, so a dropped connection costs one tick — and supervision reconnects automatically.
 
+Both front ends sit on top of that pipeline and differ only in the last step: `tui.rs` draws the ratatui buffer to the terminal, `server.rs` serializes the same buffer cell by cell and streams it to the browser. The state machine, supervision, key handling and layout are shared, so the two cannot drift apart.
+
 ## Repository layout
 
 ```
@@ -153,7 +160,7 @@ dev/verify_parity.py + dev/verify_dom.py  web-vs-TUI fidelity checks
 
 ## Privacy
 
-skimonitor reads what a shell session could already read on a host you can SSH to, keeps it in RAM for the lifetime of the terminal, and never writes metrics anywhere. No telemetry, no updates, no network calls except the SSH connections you asked for (host-key acceptance to `known_hosts` is standard ssh behavior and the only local write). Note: GPU process command lines are shown verbatim — if you put secrets in argv, they'll be visible on the screen, same as `ps`. Release binaries are built with `--remap-path-prefix`, so they contain no build-machine paths.
+skimonitor reads what a shell session could already read on a host you can SSH to, keeps it in RAM for the lifetime of the process, and never writes metrics anywhere. No telemetry, no updates, no network calls except the SSH connections you asked for (host-key acceptance to `known_hosts` is standard ssh behavior and the only local write). Note: GPU process command lines are shown verbatim — if you put secrets in argv, they'll be visible on the screen, same as `ps`. Release binaries are built with `--remap-path-prefix`, so they contain no build-machine paths.
 
 ## License
 
