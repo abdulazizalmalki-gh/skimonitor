@@ -27,4 +27,10 @@ jobs:
           curl -sf http://127.0.0.1:8399/style.css >/dev/null
           curl -sf "http://127.0.0.1:8399/api/screen?cols=150&rows=46" > /tmp/screen.json
           python3 -c "import json; d=json.load(open('/tmp/screen.json')); t=''.join(x for r in d['lines'] for x,_ in r); assert (d['cols'],d['rows'])==(150,46), d['cols']; assert 'skimonitor' in t; assert 'DEMO REPLAY' in t; assert 'quit' not in t; print('web frame ok:', len(d['lines']), 'rows,', len(t), 'cells')"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: http://evil.example' -H 'Content-Type: application/json' -d '{"a":"pause"}' http://127.0.0.1:8399/api/action)
+          [ "$code" = "403" ] || { echo "cross-origin write not refused: $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"a":"pause"}' http://127.0.0.1:8399/api/action)
+          [ "$code" = "204" ] || { echo "same-origin write failed: $code"; exit 1; }
+          curl -s -D - -o /dev/null http://127.0.0.1:8399/ | grep -qi "content-security-policy" || { echo "CSP header missing"; exit 1; }
+          echo "write-path guards ok"
           kill %1

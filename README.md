@@ -99,7 +99,7 @@ identically. There is no build step and no CDN: the page, its CSS/JS and the
 font are embedded in the binary, and a tab shows a full frame as soon as it
 connects.
 
-Consequences worth knowing before exposing it: the HTTP port has **no login of its own** — anyone who can reach it sees what you would see, including process command lines. Bind it to `127.0.0.1` behind a proxy, or keep it on a network you trust. `q`/`Ctrl-C` cannot stop the server; Esc closes the help overlay.
+Consequences worth knowing before exposing it: the HTTP port has **no login of its own** — anyone who can reach it sees what you would see, including process command lines, and can add, drop or restart hosts. Bind it to `127.0.0.1` behind a proxy, or keep it on a network you trust; see [Security](#security). `q`/`Ctrl-C` cannot stop the server; Esc closes the help overlay.
 
 Endpoints, if you want to wire it into something else: `/` (page), `/events`
 (SSE frames), `/api/screen?cols=&rows=` (one JSON frame), `/api/size`
@@ -157,6 +157,37 @@ dev/build.sh    release build with local paths remapped
 dev/capture_tui.py + dev/render_shot.py   screenshot pipeline for docs/
 dev/verify_parity.py + dev/verify_dom.py  web-vs-TUI fidelity checks
 ```
+
+## Security
+
+Default posture: skimonitor, like the `ssh` client it wraps, listens on nothing. Only `--web`
+opens a socket.
+
+**The `--web` port is an unauthenticated operator console.** Whoever can reach it can see every
+card you see (including GPU process command lines and host names) and can drive the controls:
+add or drop hosts, restart streams, change the interval. Adding a host makes *this* machine open
+an SSH connection with *your* keys, so treat the port with the same care as your ssh-agent.
+
+What to do about it:
+
+- bind loopback and put an authenticating reverse proxy in front —
+  `skimonitor --web --bind 127.0.0.1 -p 8383 …`;
+- or keep it on a network you trust (LAN, tailnet, WireGuard) and firewall the port to those
+  sources;
+- never port-forward it to the internet, and don't put it behind a public hostname.
+
+Hardening that is already in place, so you don't have to add it:
+
+- every `ssh` invocation terminates option parsing with `--`, and a target that looks like an
+  option is refused when adding a host — from the CLI, the add prompt, or the HTTP endpoint;
+- write endpoints require a same-origin browser request: a POST carrying a foreign `Origin`
+  gets `403`, so another site (or a DNS-rebound name) cannot drive your dashboard;
+- the page ships with a strict Content-Security-Policy (`default-src 'none'`, no inline script,
+  nothing off-host), `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`;
+- no state is written to disk, no telemetry, and the only outbound connections are the SSH
+  sessions you asked for.
+
+Found something? See [SECURITY.md](SECURITY.md).
 
 ## Privacy
 

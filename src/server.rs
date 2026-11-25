@@ -77,6 +77,38 @@ struct Request {
     path: String,
     query: String,
     body: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Request {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// A browser POST must come from the page we served. Without this, any
+    /// site the operator visits (or a DNS-rebound name) could drive the
+    /// dashboard's write endpoints. Non-browser clients send no Origin and are
+    /// unaffected — they already need network access to the port.
+    fn write_allowed(&self) -> bool {
+        match self.header("origin") {
+            Some(origin) => match self.header("host") {
+                Some(host) => same_origin(origin, host),
+                None => false,
+            },
+            None => true,
+        }
+    }
+}
+
+/// `origin` is scheme://host[:port]; `host` is the request's Host header.
+fn same_origin(origin: &str, host: &str) -> bool {
+    match origin.split_once("://") {
+        Some((_, rest)) => rest.trim_end_matches('/').eq_ignore_ascii_case(host),
+        None => false,
+    }
 }
 
 fn parse_query(q: &str, key: &str) -> Option<String> {
@@ -127,11 +159,14 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         None => (target, String::new()),
     };
     let mut content_length = 0usize;
+    let mut headers: Vec<(String, String)> = Vec::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
+            let (k, v) = (k.trim().to_string(), v.trim().to_string());
             if k.eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().unwrap_or(0);
+                content_length = v.parse().unwrap_or(0);
             }
+            headers.push((k, v));
         }
     }
     let body_start = head_end + 4;
@@ -149,6 +184,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         path,
         query,
         body: String::from_utf8_lossy(&body).to_string(),
+        headers,
     })
 }
 
@@ -158,6 +194,7 @@ fn reason(code: u16) -> &'static str {
         204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
+        403 => "Forbidden",
         405 => "Method Not Allowed",
         _ => "Error",
     }
@@ -165,7 +202,7 @@ fn reason(code: u16) -> &'static str {
 
 fn respond(stream: &mut TcpStream, code: u16, mime: &str, body: &[u8]) {
     let head = format!(
-        "HTTP/1.1 {code} {}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {code} {}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
         reason(code),
         body.len()
     );
@@ -224,14 +261,24 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Shared>) {
     let Some(req) = read_request(&mut stream) else {
         return;
     };
+    if req.method == "POST" && !req.write_allowed() {
+        return respond(&mut stream, 403, "text/plain; charset=utf-8", b"cross-origin write refused\n");
+    }
     let path = req.path.as_str();
     match (req.method.as_str(), path) {
-        ("GET", "/") | ("GET", "/index.html") => respond(
-            &mut stream,
-            200,
-            "text/html; charset=utf-8",
-            INDEX_HTML.as_bytes(),
-        ),
+        ("GET", "/") | ("GET", "/index.html") => {
+            // the page loads nothing from anywhere else: no CDN, no inline
+            // script. Inline *styles* are needed (the braille rules and the
+            // per-cell style attributes).
+            let body = INDEX_HTML.as_bytes();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+        }
         ("GET", "/app.js") => respond(
             &mut stream,
             200,
@@ -495,6 +542,33 @@ mod tests {
         assert!(app.input.is_some());
         apply_web_key(&mut app, KeyCode::Esc);
         assert!(app.input.is_none());
+    }
+
+    #[test]
+    fn cross_origin_writes_are_refused() {
+        assert!(same_origin("http://127.0.0.1:8383", "127.0.0.1:8383"));
+        assert!(same_origin("https://mon.lan", "mon.lan"));
+        assert!(!same_origin("http://127.0.0.1:8383", "mon.lan"));
+        assert!(!same_origin("http://evil.example", "127.0.0.1:8383"));
+        assert!(!same_origin("null", "127.0.0.1:8383"));
+
+        let req = |origin: Option<&str>| Request {
+            method: "POST".into(),
+            path: "/api/action".into(),
+            query: String::new(),
+            body: "{}".into(),
+            headers: {
+                let mut h = vec![("Host".to_string(), "127.0.0.1:8383".to_string())];
+                if let Some(o) = origin {
+                    h.push(("Origin".to_string(), o.to_string()));
+                }
+                h
+            },
+        };
+        assert!(req(None).write_allowed()); // curl / scripts: no Origin
+        assert!(req(Some("http://127.0.0.1:8383")).write_allowed());
+        assert!(!req(Some("http://evil.example")).write_allowed());
+        assert!(!req(Some("null")).write_allowed());
     }
 
     #[test]

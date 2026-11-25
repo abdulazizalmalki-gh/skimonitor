@@ -138,6 +138,17 @@ impl App {
         if target.is_empty() || self.hosts.iter().any(|h| h.target == target) {
             return;
         }
+        // An option-shaped string is never a host: the ssh argv puts "--" ahead
+        // of the target, but the add prompt and the web endpoint both accept
+        // free text, so refuse it here too instead of handing it to ssh.
+        if target.starts_with('-') {
+            self.note = Some(format!("'{target}' looks like an option, not a host"));
+            return;
+        }
+        if target.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            self.note = Some("a host cannot contain spaces or control characters".into());
+            return;
+        }
         if self.hosts.len() >= MAX_HOSTS {
             self.note = Some(format!("max {MAX_HOSTS} hosts — drop one with [x] first"));
             return;
@@ -653,6 +664,19 @@ mod tests {
         assert_eq!(app.rows, vec![2, 2, 2]);
         assert_eq!(order(&app), ["a", "d", "b", "f", "c", "e"]);
         assert_eq!(app.sel, 3);
+    }
+
+    #[test]
+    fn option_shaped_and_multiline_targets_are_refused() {
+        let mut app = app_with(&["a"]);
+        app.add_target("-oProxyCommand=id");
+        app.add_target("host\nwithnewline");
+        app.add_target("two words");
+        assert_eq!(order(&app), ["a"]);
+        assert!(app.note.is_some());
+        // a real host with every character a target legitimately uses still lands
+        app.add_target("user@web-01.lan:2222");
+        assert_eq!(order(&app), ["a", "user@web-01.lan:2222"]);
     }
 
     #[test]
