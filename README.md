@@ -2,7 +2,7 @@
 
 **One terminal. Up to six servers. Everything at a glance.**
 
-skimonitor is a multi-host SSH monitoring TUI written in Rust. Point it at your machines and it streams a single dense dashboard — CPU, memory, disks (including ZFS truth), network, temperatures, and GPUs with per-process VRAM — side by side, refreshed every second. No agents, no daemon, no database: just SSH keys and one static binary.
+skimonitor is a multi-host SSH monitoring TUI written in Rust. Point it at your machines and it streams a single dense dashboard — CPU, memory, disks (including ZFS truth), network, temperatures, and GPUs with per-process VRAM — side by side, refreshed every second. No agents, no daemon, no database: just SSH keys and one static binary. Prefer a browser tab to a terminal? `--web` serves the exact same screen over HTTP.
 
 ![skimonitor dashboard](docs/screenshot.png)
 
@@ -24,6 +24,7 @@ Most fleet monitors want you to install a collector on every box, run a server, 
 - **Nothing silently truncated** — cards scroll (keys or mouse wheel); a GPU process with a 300-character command line is wrapped and shown in full. The title bar tells you exactly which lines you're looking at (`↕7-42/58`).
 - **Self-healing streams** — dead SSH connections are detected, respawned with capped exponential backoff, and a silence watchdog reconnects streams that stop answering. Auth failures as your user automatically retry as `root@host`.
 - **`--demo` mode** — three invented hosts replayed through the real code path, for screenshots, testing, and showing your team what the tool does. No SSH, no data, no risk.
+- **The same dashboard in a browser** — `--web` serves it over HTTP instead of drawing a TUI. Not a re-design: the server paints the *identical* ratatui buffer and ships the cells to the page, so the browser shows the terminal screen glyph for glyph (see [Web dashboard](#web-dashboard---web)).
 
 ## Install
 
@@ -73,7 +74,36 @@ Nothing is stored by skimonitor or sent anywhere except the hosts you target. On
 | `+` / `-` | stream interval, 1..60 s |
 | `r` | restart all streams |
 | `p` | pause (tears down the SSH sessions) / resume |
-| `?` / `q` | help / quit |
+| `?` / `q` | help / quit (`q` and `Ctrl-C` are terminal-only; a `--web` server is stopped by its operator) |
+
+## Web dashboard (`--web`)
+
+```
+skimonitor --web web-01 db-01 cache-02        # http://<this machine>:8383/
+skimonitor --web -p 9000 --bind 127.0.0.1 db-01   # loopback only, for a reverse proxy
+```
+
+![skimonitor in a browser](docs/web.png)
+
+The page is the terminal screen, not a reinterpretation of it: skimonitor draws
+the same `ui::draw` into an off-screen ratatui buffer at the browser's grid
+size and ships those cells (glyph, foreground, background, bold) over
+Server-Sent Events. The page is a monospace grid that paints them; braille
+sparklines and block glyphs are drawn as cell geometry because no common
+monospace font has them. Keys, clicks and the wheel post back to the same state
+machine the TUI uses, so scrolling, focus, add/drop and pause behave
+identically.
+
+Consequences worth knowing before exposing it: the HTTP port has **no login of its own** — anyone who can reach it sees what you would see, including process command lines. Bind it to `127.0.0.1` behind a proxy, or keep it on a network you trust. `q`/`Ctrl-C` cannot stop the server; Esc closes the help overlay.
+
+Endpoints, if you want to wire it into something else: `/` (page), `/events`
+(SSE frames), `/api/screen?cols=&rows=` (one JSON frame), `/api/size`
+(grid), `/api/{key,click,wheel,add,action}`, `/health`.
+
+Two scripts keep the fidelity claim honest (the demo instance is enough):
+`dev/verify_parity.py` compares the served cells against a TUI capture at the
+same size, and `dev/verify_dom.py` compares what the browser built against the
+frame it was handed. `dev/capture_web.sh` re-shoots `docs/web.png`.
 
 ## `--once`: scripted snapshots
 
@@ -105,14 +135,20 @@ One persistent `ssh -T` per host runs the embedded probe (`probe.sh`, bash + cor
 
 ```
 probe.sh        the remote probe (embedded via include_str!)
-src/main.rs     app state, stream supervision, input
+src/main.rs     CLI + front-end dispatch
+src/app.rs      app state, stream supervision, key handling
+src/tui.rs      terminal front end (crossterm)
+src/server.rs   --web front end: HTTP/SSE server + render loop
+src/view.rs     renders the screen to cells and serializes them
 src/model.rs    probe JSON schema + frame-diff metrics
 src/ui.rs       card rendering, scrolling, layout
 src/widgets.rs  gauges, heat colors, braille sparklines
 src/demo.rs     --demo synthetic hosts (same pipeline as live)
 src/ssh.rs      ssh invocation, stream reader
+web/            the browser page (grid renderer, geometry glyphs, font)
 dev/build.sh    release build with local paths remapped
 dev/capture_tui.py + dev/render_shot.py   screenshot pipeline for docs/
+dev/verify_parity.py + dev/verify_dom.py  web-vs-TUI fidelity checks
 ```
 
 ## Privacy

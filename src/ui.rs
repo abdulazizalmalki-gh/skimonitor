@@ -76,6 +76,7 @@ pub fn draw(
     paused: bool,
     note: &Option<String>,
     scrolls: &[usize],
+    web: bool,
 ) -> (Vec<usize>, Vec<CardGeom>) {
     let area = f.area();
     let chunks = Layout::vertical([
@@ -136,10 +137,12 @@ pub fn draw(
             .collect();
         head.push(Span::styled(format!("{lbl} "), st));
     }
-    let hint = if hosts.len() < MAX_HOSTS {
-        "  [a]add [x]drop [r]restart [p]pause [?]help [q]quit"
-    } else {
-        "  [x]drop [r]restart [?]help [q]quit"
+    // the browser has no quit key: stopping a server is the operator's job
+    let hint = match (hosts.len() < MAX_HOSTS, web) {
+        (false, false) => "  [x]drop [r]restart [?]help [q]quit",
+        (false, true) => "  [x]drop [r]restart [?]help",
+        (true, false) => "  [a]add [x]drop [r]restart [p]pause [?]help [q]quit",
+        (true, true) => "  [a]add [x]drop [r]restart [p]pause [?]help",
     };
     head.push(Span::styled(hint, Style::default().fg(C_MUTED)));
     f.render_widget(Paragraph::new(Line::from(head)), chunks[0]);
@@ -239,7 +242,7 @@ pub fn draw(
     }
 
     if help {
-        draw_help(f, area);
+        draw_help(f, area, web);
     }
     (maxscrolls, geoms)
 }
@@ -1203,7 +1206,7 @@ fn wrap_cmd(name: &str, w: usize) -> Vec<String> {
     out
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
+fn draw_help(f: &mut Frame, area: Rect, web: bool) {
     let w = 74u16.min(area.width.saturating_sub(4));
     let h = 22u16.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -1224,7 +1227,11 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from(" ↑↓/PgUp/PgDn   scroll focused card (↕ lines in its title)"),
         Line::from(" Home/End jump to top / bottom of the focused card"),
         Line::from(" wheel    scroll the card under the mouse (if reported)"),
-        Line::from(" ? this help        q / Ctrl-C quit"),
+        Line::from(if web {
+            " ? this help        Esc close help"
+        } else {
+            " ? this help        q / Ctrl-C quit"
+        }),
         Line::from(""),
         Line::from(Span::styled(
             " mem bar:  red = used, amber = cache/reclaimable, dark = free.",

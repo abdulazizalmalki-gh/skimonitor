@@ -1,0 +1,117 @@
+/* skimonitor --web: the TUI screen as a browser page.
+   One monospace cell grid, no chrome of its own: the header, cards, borders and
+   bars all come from the server's ratatui buffer. */
+
+@font-face {
+  font-family: 'JBM';
+  src: url('/font/regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'JBM';
+  src: url('/font/bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  --fs: 16px;
+  --lh: 23px;
+  --cw: 9.6px;
+  --bg: #0d1117;
+  --fg: #c9d1d9;
+  --font: 'JBM', 'DejaVu Sans Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+body {
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs);
+  line-height: var(--lh);
+  font-variant-ligatures: none;
+  font-kerning: none;
+  font-feature-settings: "liga" 0, "calt" 0, "kern" 0, "dlig" 0;
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#screen {
+  position: relative;
+  white-space: pre;
+  outline: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  height: var(--lh);
+  line-height: var(--lh);
+  white-space: pre;
+  overflow: hidden;
+}
+
+.boot {
+  color: #7f7f7f;
+  padding-left: var(--cw);
+}
+
+/* ---- glyphs drawn as geometry, not font glyphs -------------------------
+   Block/eighths/shade characters inside bars must tile the cell exactly, and
+   braille has no coverage in any common monospace font. Both are painted here
+   the way the project's own screenshot renderer paints them: full-cell
+   rectangles, fractional rectangles, a dot grid, and a 2x4 braille dot matrix
+   whose fore/background come from the cell's own colours. */
+
+.ge, .br {
+  display: inline-block;
+  width: var(--cw);
+  height: var(--lh);
+  vertical-align: top;
+  background-repeat: no-repeat;
+  background-position: 0 0;
+}
+
+/* full block */
+.ge.g8 { background-color: currentColor; }
+
+/* eighths, bottom-aligned */
+.ge.g1 { background-image: linear-gradient(to top, currentColor 12.5%, transparent 12.5%); }
+.ge.g2 { background-image: linear-gradient(to top, currentColor 25%, transparent 25%); }
+.ge.g3 { background-image: linear-gradient(to top, currentColor 37.5%, transparent 37.5%); }
+.ge.g4 { background-image: linear-gradient(to top, currentColor 50%, transparent 50%); }
+.ge.g5 { background-image: linear-gradient(to top, currentColor 62.5%, transparent 62.5%); }
+.ge.g6 { background-image: linear-gradient(to top, currentColor 75%, transparent 75%); }
+.ge.g7 { background-image: linear-gradient(to top, currentColor 87.5%, transparent 87.5%); }
+
+/* eighths, left-aligned (gauge's partial cell) */
+.ge.l1 { background-image: linear-gradient(to right, currentColor 12.5%, transparent 12.5%); }
+.ge.l2 { background-image: linear-gradient(to right, currentColor 25%, transparent 25%); }
+.ge.l3 { background-image: linear-gradient(to right, currentColor 37.5%, transparent 37.5%); }
+.ge.l4 { background-image: linear-gradient(to right, currentColor 50%, transparent 50%); }
+.ge.l5 { background-image: linear-gradient(to right, currentColor 62.5%, transparent 62.5%); }
+.ge.l6 { background-image: linear-gradient(to right, currentColor 75%, transparent 75%); }
+.ge.l7 { background-image: linear-gradient(to right, currentColor 87.5%, transparent 87.5%); }
+
+/* light shade: the empty bar track. A 1px dot on a 4px pitch (~25% coverage),
+   matching how a terminal renders ░ — one gradient tile must REPEAT, or the
+   track reads as empty background. */
+.ge.sh {
+  background-image: radial-gradient(currentColor 0 1px, transparent 1.3px);
+  background-size: 4px 4px;
+  background-repeat: repeat;
+}

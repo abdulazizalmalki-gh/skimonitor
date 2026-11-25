@@ -18,3 +18,13 @@ jobs:
         run: bash -n probe.sh
       - name: smoke (local host, one frame)
         run: ./target/release/skimonitor --once local
+      - name: serve smoke (--web, one rendered frame)
+        run: |
+          ./target/release/skimonitor --web --demo -p 8399 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8399/health >/dev/null && break; sleep 0.5; done
+          curl -sf http://127.0.0.1:8399/ >/dev/null
+          curl -sf http://127.0.0.1:8399/app.js >/dev/null
+          curl -sf http://127.0.0.1:8399/style.css >/dev/null
+          curl -sf "http://127.0.0.1:8399/api/screen?cols=150&rows=46" > /tmp/screen.json
+          python3 -c "import json; d=json.load(open('/tmp/screen.json')); t=''.join(x for r in d['lines'] for x,_ in r); assert (d['cols'],d['rows'])==(150,46), d['cols']; assert 'skimonitor' in t; assert 'DEMO REPLAY' in t; assert 'quit' not in t; print('web frame ok:', len(d['lines']), 'rows,', len(t), 'cells')"
+          kill %1
