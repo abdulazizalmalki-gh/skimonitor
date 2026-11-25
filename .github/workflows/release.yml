@@ -7,6 +7,8 @@ permissions:
 jobs:
   build:
     strategy:
+      # one runner label going away must not cost us the other platforms
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
@@ -15,10 +17,10 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: linux-aarch64
-          - os: macos-14
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             arch: macos-x86_64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             arch: macos-aarch64
     runs-on: ${{ matrix.os }}
